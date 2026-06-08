@@ -9,10 +9,6 @@
       <Group guid="guidReactorCmdSet" id="MyMenuGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_ITEMNODE"/>
       </Group>
-
-      <Group guid="guidReactorCmdSet" id="OtherWindowsGroup" priority="0x0600">
-        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1"/>
-      </Group>
     </Groups>
 
     <Buttons>
@@ -24,7 +20,7 @@
       </Button>
 
       <Button guid="guidReactorCmdSet" id="cmdidShowComponents" priority="0x0101" type="Button">
-        <Parent guid="guidReactorCmdSet" id="OtherWindowsGroup" />
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
         <Strings>
           <ButtonText>Reactor Components</ButtonText>
         </Strings>
@@ -39,7 +35,6 @@
     <!-- This is the GUID used to group the menu commands together -->
     <GuidSymbol name="guidReactorCmdSet" value="{e87f1190-2c77-4c8d-8fb8-2231ab46618e}">
       <IDSymbol name="MyMenuGroup" value="0x1020" />
-      <IDSymbol name="OtherWindowsGroup" value="0x1021" />
       <IDSymbol name="cmdidShowPreview" value="0x0100" />
       <IDSymbol name="cmdidShowComponents" value="0x0101" />
     </GuidSymbol>

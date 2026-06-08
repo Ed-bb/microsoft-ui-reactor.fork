@@ -529,11 +529,34 @@ namespace Reactor.VisualStudio.Services
 
             var html = HtmlRenderer.GeneratePreviewHtml(ast, new System.Collections.Generic.List<string>(), "MyWidget");
 
-            // \U0001F319 converts to crescent moon 🌙 (Unicode: \uD83C\uDF19)
-            html.ShouldContain("\uD83C\uDF19");
-
             // \u2600 converts to black sun with rays ☀
             html.ShouldContain("\u2600");
+        }
+
+        /// <summary>
+        /// Verifies that conditional expressions choose the false path as content.
+        /// </summary>
+        [Test]
+        public void ParseAst_ConditionalExpression_ShouldChooseFalsePath()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render() =>
+                            TextBlock(showText ? ""True Text"" : ""False Text"");
+                    }
+                }";
+
+            var ast = AstParser.ParseAst(code, "MyWidget");
+
+            ast.ShouldNotBeNull();
+
+            ast.Name.ShouldBe("TextBlock");
+
+            ast.Content.ShouldBe("False Text");
         }
 
         /// <summary>

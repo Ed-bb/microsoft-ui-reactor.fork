@@ -247,3 +247,4 @@ tests/stress_perf_rn/**/Generated Files/
 
 # MkDocs build output
 /site/
+/src/Reactor.VisualStudio/Reactor.VisualStudio/Reactor.VisualStudio.vsix

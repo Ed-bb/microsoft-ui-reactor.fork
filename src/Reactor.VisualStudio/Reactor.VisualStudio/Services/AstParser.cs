@@ -454,6 +454,22 @@ namespace Reactor.VisualStudio.Services
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
             HashSet<string>? expandingMethods = null)
         {
+            while (true)
+            {
+                if (argExpr is ParenthesizedExpressionSyntax parenthesized)
+                {
+                    argExpr = parenthesized.Expression;
+                }
+                else if (argExpr is ConditionalExpressionSyntax conditional)
+                {
+                    argExpr = conditional.WhenFalse;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
             if (argExpr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
             {
                 argExpr = replaced;
@@ -575,6 +591,11 @@ namespace Reactor.VisualStudio.Services
             if (expr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
             {
                 return TryGetConstantString(replaced, out value, parameterReplacements);
+            }
+
+            if (expr is ConditionalExpressionSyntax conditional)
+            {
+                return TryGetConstantString(conditional.WhenFalse, out value, parameterReplacements);
             }
 
             if (expr is LiteralExpressionSyntax literal && literal.Token.IsKind(SyntaxKind.StringLiteralToken))

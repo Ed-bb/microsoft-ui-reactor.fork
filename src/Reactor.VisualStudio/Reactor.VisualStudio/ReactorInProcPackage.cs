@@ -73,11 +73,12 @@ namespace Reactor.VisualStudio
 
                 Log("Initialize: In-process package initializing...");
 
-                LogToFile("Initializing context command...");
+                LogToFile("Initializing commands...");
 
                 await ShowPreviewContextCommand.InitializeAsync(this);
+                await ShowComponentsCommand.InitializeAsync(this);
 
-                LogToFile("Context command initialized.");
+                LogToFile("Commands initialized.");
 
                 try
                 {
@@ -343,7 +344,7 @@ namespace Reactor.VisualStudio
         {
             try
             {
-                var path = @"C:\Users\andreas\.gemini\antigravity-ide\brain\44acb492-df38-4407-9cc4-80509aed04de\extension_debug.log";
+                var path = Path.Combine(Path.GetTempPath(), "reactor_preview_extension_debug.log");
 
                 System.IO.File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [InProc] {message}{Environment.NewLine}");
             }

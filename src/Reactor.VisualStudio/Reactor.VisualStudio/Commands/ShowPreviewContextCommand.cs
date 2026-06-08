@@ -24,11 +24,6 @@ namespace Reactor.VisualStudio.Commands
         /// </summary>
         public const int CommandId = 0x0100;
 
-        /// <summary>
-        /// Command ID for Reactor Components.
-        /// </summary>
-        public const int ComponentsCommandId = 0x0101;
-
         private readonly AsyncPackage _package;
 
         private ShowPreviewContextCommand(AsyncPackage package)
@@ -62,12 +57,7 @@ namespace Reactor.VisualStudio.Commands
 
                 commandService.AddCommand(previewMenuItem);
 
-                var componentsCommandId = new CommandID(CommandSet, ComponentsCommandId);
-                var componentsMenuItem = new OleMenuCommand(OnExecuteComponents, componentsCommandId);
-
-                commandService.AddCommand(componentsMenuItem);
-
-                ReactorInProcPackage.Log("ShowPreviewContextCommand: Registered preview and components menu commands.");
+                ReactorInProcPackage.Log("ShowPreviewContextCommand: Registered preview menu command.");
             }
             else
             {
@@ -132,42 +122,6 @@ namespace Reactor.VisualStudio.Commands
             if (Instance?._package is ReactorInProcPackage package)
             {
                 _ = package.StartPreviewAsync(path, default);
-            }
-        }
-
-        private static void OnExecuteComponents(object sender, EventArgs e)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            ReactorInProcPackage.Log("ShowPreviewContextCommand: Components menu command invoked.");
-
-            _ = OpenComponentsWindowAsync();
-        }
-
-        private static async Task OpenComponentsWindowAsync()
-        {
-            try
-            {
-                ReactorInProcPackage.Log("ShowPreviewContextCommand: OpenComponentsWindowAsync started.");
-
-                var package = Instance?._package as ReactorInProcPackage;
-
-                if (package != null)
-                {
-                    ReactorInProcPackage.Log("ShowPreviewContextCommand: Found ReactorInProcPackage instance. Calling ShowComponentsWindowAsync.");
-
-                    await package.ShowComponentsWindowAsync(default);
-
-                    ReactorInProcPackage.Log("ShowPreviewContextCommand: ShowComponentsWindowAsync returned.");
-                }
-                else
-                {
-                    ReactorInProcPackage.Log("ShowPreviewContextCommand: ReactorInProcPackage instance is null. Cannot open components window.");
-                }
-            }
-            catch (Exception ex)
-            {
-                ReactorInProcPackage.Log($"ShowPreviewContextCommand: Error opening components window: {ex.Message}");
             }
         }
 
