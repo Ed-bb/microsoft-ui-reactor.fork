@@ -413,6 +413,9 @@
     </Project>
     <Project Path="tests/stress_perf/StressPerf.Wpf/StressPerf.Wpf.csproj" />
   </Folder>
+  <Folder Name="/docs/" />
+  <Folder Name="/docs/_pipeline/" />
+  <Folder Name="/docs/_pipeline/apps/" />
   <Folder Name="/docs/_pipeline/apps/win2d-canvas/">
     <Project Path="docs/_pipeline/apps/win2d-canvas/win2d-canvas.csproj">
       <Platform Solution="*|ARM64" Project="ARM64" />
@@ -446,6 +449,9 @@
   </Project>
   <Project Path="src/Reactor.Localization.Generator/Reactor.Localization.Generator.csproj" />
   <Project Path="src/Reactor.Devtools/Reactor.Devtools.csproj" />
+  <Project Path="src/Reactor.VisualStudio/Reactor.VisualStudio/Reactor.VisualStudio.csproj">
+    <Deploy />
+  </Project>
   <Project Path="src/Reactor/Reactor.csproj" />
   <Project Path="src/Reactor.Advanced/Reactor.Advanced.csproj">
     <Platform Solution="*|ARM64" Project="ARM64" />

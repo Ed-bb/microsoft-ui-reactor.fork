@@ -1,0 +1,49 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWpf>true</UseWpf>
+    <LangVersion>10.0</LangVersion>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <RegisterWithCodebase>true</RegisterWithCodebase>
+    <UseCodebase>true</UseCodebase>
+    <CreatePkgDefAssemblyToProcess>obj\Debug\net48\Reactor.VisualStudio.dll</CreatePkgDefAssemblyToProcess>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CopyOutputSymbolsToOutputDirectory>true</CopyOutputSymbolsToOutputDirectory>
+    <CreateVsixContainer>true</CreateVsixContainer>
+    <TemplateOutputDirectory>obj\Debug\net48\</TemplateOutputDirectory>
+    <TargetVsixContainerName>Reactor.VisualStudio.vsix</TargetVsixContainerName>
+    <TargetVsixContainer>$(OutDir)Reactor.VisualStudio.vsix</TargetVsixContainer>
+    <VsdkCompatibleExtension>true</VsdkCompatibleExtension>
+    <NoWarn>$(NoWarn);VSEXT0004;VSEXT0008</NoWarn>
+    <Version>0.1.4</Version>
+    <StartAction>Program</StartAction>
+    <StartProgram Condition="'$(DevEnvDir)' != ''">$(DevEnvDir)devenv.exe</StartProgram>
+    <StartArguments>/rootsuffix Exp /log</StartArguments>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectCapability Include="CreateVsixContainer" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.11.40262" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="18.5.40034" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
+    <PackageReference Include="Microsoft.ServiceHub.Framework" Version="4.8.55" />
+  </ItemGroup>
+  <ItemGroup>
+    <VSCTCompile Include="ReactorCommandTable.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+      <SubType>Designer</SubType>
+    </VSCTCompile>
+    <None Include="source.extension.vsixmanifest">
+      <SubType>Designer</SubType>
+    </None>
+  </ItemGroup>
+  <Import Project="$(VSToolsPath)\vssdk\Microsoft.VsSDK.targets" Condition="Exists('$(VSToolsPath)\vssdk\Microsoft.VsSDK.targets')" />
+  <Target Name="HookCreateVsixContainer" AfterTargets="Build" DependsOnTargets="CreateVsixContainer" Condition="'$(CreateVsixContainer)' == 'true'" />
+  <Target Name="RunGeneratePkgDef" AfterTargets="Compile" DependsOnTargets="GeneratePkgDef;CopyPkgDef" />
+</Project>

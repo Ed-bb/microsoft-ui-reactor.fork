@@ -1,0 +1,30 @@
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata>
+    <Identity Id="ReactorPreview.VisualStudio" Version="0.1.4" Language="en-US" Publisher="Hefaistos68" />
+    <DisplayName>Reactor Preview</DisplayName>
+    <Description>Live preview panel for Reactor components — shows a streaming thumbnail of the native WinUI preview window in Visual Studio 2026.</Description>
+    <MoreInfo>https://github.com/Hefaistos68</MoreInfo>
+    <Tags>winui, winui3, reactor, live-preview, csharp, components</Tags>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[18.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[18.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[18.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName=".NET Framework" Version="[4.8,)" />
+  </Dependencies>
+  <Assets>
+    <!-- VSSDK in-process package Asset -->
+    <Asset Type="Microsoft.VisualStudio.VsPackage" Path="Reactor.VisualStudio.pkgdef" />
+  </Assets>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" DisplayName="Visual Studio core editor" Version="[18.0,19.0)" />
+  </Prerequisites>
+</PackageManifest>
