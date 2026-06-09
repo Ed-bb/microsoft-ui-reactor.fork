@@ -23,8 +23,8 @@ namespace Reactor.VisualStudio
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [Guid(PackageGuidString)]
     [ProvideMenuResource("Menus.ctmenu", 1)]
-    [ProvideToolWindow(typeof(PreviewToolWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057")]
-    [ProvideToolWindow(typeof(ComponentsToolWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057")]
+    [ProvideToolWindow(typeof(PreviewToolWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057", Transient = false)]
+    [ProvideToolWindow(typeof(ComponentsToolWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057", Transient = false)]
     public sealed class ReactorInProcPackage : AsyncPackage
     {
         /// <summary>
@@ -189,7 +189,7 @@ namespace Reactor.VisualStudio
 
             if (window?.Frame is IVsWindowFrame frame)
             {
-                frame.CloseFrame((uint)__FRAMECLOSE.FRAMECLOSE_NoSave);
+                ErrorHandler.ThrowOnFailure(frame.Hide());
             }
         }
 
