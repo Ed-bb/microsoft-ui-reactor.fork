@@ -208,6 +208,11 @@ namespace Reactor.VisualStudio.Services
                 return RenderComponent(ast, classes, styles);
             }
 
+            if (lowerName == "control")
+            {
+                return RenderWinRTControl(ast, classes, styles);
+            }
+
             if (lowerName.Contains("button"))
             {
                 return RenderButton(ast, classes, styles, customId, resources, hasResources);
@@ -520,6 +525,38 @@ namespace Reactor.VisualStudio.Services
             var titleAttr = $" title=\"{ast.Name}\"";
 
             return $"<div{classAttr}{styleAttr}{titleAttr}><div class=\"component-label\">{componentLabel}</div>{content}</div>";
+        }
+
+        /// <summary>
+        /// Renders a native WinRT control container and its children.
+        /// </summary>
+        /// <param name="ast">The AST element representing the WinRT control wrapper.</param>
+        /// <param name="classes">CSS classes collection.</param>
+        /// <param name="styles">Inline styles collection.</param>
+        /// <returns>HTML for the WinRT control container.</returns>
+        private static string RenderWinRTControl(AstElement ast, List<string> classes, List<string> styles)
+        {
+            var genericType = string.Empty;
+            ast.Properties.TryGetValue("GenericType", out genericType);
+
+            classes.Add("winrt-control-container");
+            styles.Add("border: 1px solid rgba(147, 51, 234, 0.3); border-radius: 6px; padding: 12px 16px; background: rgba(147, 51, 234, 0.03); margin: 6px 0; width: 100%; display: flex; flex-direction: column;");
+
+            var content = new StringBuilder();
+            foreach (var child in ast.Children)
+            {
+                content.Append(RenderAstElement(child));
+            }
+
+            var label = string.IsNullOrEmpty(genericType) ? "WinRT Control" : $"WinRT Control &lt;{EscapeHtml(genericType)}&gt;";
+            var classAttr = classes.Count > 0 ? $" class=\"{string.Join(" ", classes)}\"" : "";
+            var styleAttr = styles.Count > 0 ? $" style=\"{string.Join(" ", styles)}\"" : "";
+            var titleAttr = $" title=\"{ast.Name}\"";
+
+            return $@"<div{classAttr}{styleAttr}{titleAttr}>
+                <div class=""winrt-control-label"" style=""font-weight: 700; font-size: 10px; color: #a855f7; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px;"">{label}</div>
+                {content}
+            </div>";
         }
 
         /// <summary>

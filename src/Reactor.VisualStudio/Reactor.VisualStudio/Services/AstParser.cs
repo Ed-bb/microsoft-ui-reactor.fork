@@ -183,28 +183,67 @@ namespace Reactor.VisualStudio.Services
                 return null;
             }
 
-            if (expr is IdentifierNameSyntax exprId && parameterReplacements != null && parameterReplacements.TryGetValue(exprId.Identifier.Text, out var replacedExpr))
+            if (expr is IdentifierNameSyntax exprId)
             {
-                var parameterName = exprId.Identifier.Text;
-
-                if (expandingParameters != null && expandingParameters.Contains(parameterName))
+                var idText = exprId.Identifier.Text;
+                if (parameterReplacements != null && parameterReplacements.TryGetValue(idText, out var replacedExpr))
                 {
-                    return null;
+                    var parameterName = idText;
+
+                    if (expandingParameters != null && expandingParameters.Contains(parameterName))
+                    {
+                        return null;
+                    }
+
+                    var nextExpandingParameters = expandingParameters == null
+                        ? new HashSet<string>(StringComparer.Ordinal)
+                        : new HashSet<string>(expandingParameters, StringComparer.Ordinal);
+
+                    nextExpandingParameters.Add(parameterName);
+
+                    return ParseExpression(replacedExpr, classDecl, parameterReplacements, expandingMethods, nextExpandingParameters);
                 }
 
-                var nextExpandingParameters = expandingParameters == null
-                    ? new HashSet<string>(StringComparer.Ordinal)
-                    : new HashSet<string>(expandingParameters, StringComparer.Ordinal);
+                if (classDecl != null)
+                {
+                    var prop = classDecl.Members.OfType<PropertyDeclarationSyntax>()
+                                         .FirstOrDefault(p => p.Identifier.Text == idText);
+                    if (prop?.Initializer != null)
+                    {
+                        return ParseExpression(prop.Initializer.Value, classDecl, parameterReplacements, expandingMethods, expandingParameters);
+                    }
 
-                nextExpandingParameters.Add(parameterName);
-
-                return ParseExpression(replacedExpr, classDecl, parameterReplacements, expandingMethods, nextExpandingParameters);
+                    var field = classDecl.Members.OfType<FieldDeclarationSyntax>()
+                                          .FirstOrDefault(f => f.Declaration.Variables.Any(v => v.Identifier.Text == idText));
+                    var variable = field?.Declaration.Variables.FirstOrDefault(v => v.Identifier.Text == idText);
+                    if (variable?.Initializer != null)
+                    {
+                        return ParseExpression(variable.Initializer.Value, classDecl, parameterReplacements, expandingMethods, expandingParameters);
+                    }
+                }
             }
 
             if (expr is InvocationExpressionSyntax invocation)
             {
                 if (invocation.Expression is SimpleNameSyntax simpleName)
                 {
+                    if (simpleName.Identifier.Text == "Component" && simpleName is GenericNameSyntax genericName && genericName.TypeArgumentList.Arguments.Count > 0)
+                    {
+                        var subComponentName = genericName.TypeArgumentList.Arguments[0].ToString();
+                        var customComponent = FindClassDeclaration(classDecl?.Parent ?? classDecl, subComponentName);
+                        if (customComponent != null && IsComponentClass(customComponent))
+                        {
+                            var renderedSub = ParseSubComponentRender(customComponent, new Dictionary<string, ExpressionSyntax>(), expandingMethods, expandingParameters);
+                            if (renderedSub != null)
+                            {
+                                var compElem = new AstElement { Name = "Component" };
+                                compElem.Properties["GenericType"] = subComponentName;
+                                compElem.Children.Add(renderedSub);
+                                return compElem;
+                            }
+                        }
+                    }
+
                     var resolvedMethodElement = ParseClassMethodInvocation(invocation, simpleName, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
                     if (resolvedMethodElement != null)
@@ -214,9 +253,9 @@ namespace Reactor.VisualStudio.Services
 
                     var elem = new AstElement { Name = simpleName.Identifier.Text };
 
-                    if (simpleName is GenericNameSyntax genericName)
+                    if (simpleName is GenericNameSyntax genericName2)
                     {
-                        var typeArgs = genericName.TypeArgumentList.Arguments
+                        var typeArgs = genericName2.TypeArgumentList.Arguments
                                                    .Select(a => a.ToString())
                                                    .ToList();
 
@@ -233,12 +272,114 @@ namespace Reactor.VisualStudio.Services
 
                 if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
                 {
+                    var methodName = memberAccess.Name.Identifier.Text;
+                    if (methodName == "ToArray" || methodName == "ToList")
+                    {
+                        return ParseExpression(memberAccess.Expression, classDecl, parameterReplacements, expandingMethods, expandingParameters);
+                    }
+
+                    if (methodName == "Select")
+                    {
+                        var sourceExpr = memberAccess.Expression;
+                        if (invocation.ArgumentList.Arguments.Count > 0 && 
+                            invocation.ArgumentList.Arguments[0].Expression is LambdaExpressionSyntax lambda)
+                        {
+                            string? lambdaParamName = null;
+                            if (lambda is SimpleLambdaExpressionSyntax simpleLambda)
+                            {
+                                lambdaParamName = simpleLambda.Parameter.Identifier.Text;
+                            }
+                            else if (lambda is ParenthesizedLambdaExpressionSyntax parenLambda)
+                            {
+                                lambdaParamName = parenLambda.ParameterList.Parameters.FirstOrDefault()?.Identifier.Text;
+                            }
+
+                            if (lambdaParamName != null)
+                            {
+                                ExpressionSyntax? lambdaBodyExpr = null;
+                                if (lambda.Body is ExpressionSyntax bodyExpr)
+                                {
+                                    lambdaBodyExpr = bodyExpr;
+                                }
+                                else if (lambda.Body is BlockSyntax block)
+                                {
+                                    var returnStmt = block.Statements.OfType<ReturnStatementSyntax>().FirstOrDefault();
+                                    if (returnStmt != null)
+                                    {
+                                        lambdaBodyExpr = returnStmt.Expression;
+                                    }
+                                }
+
+                                if (lambdaBodyExpr != null)
+                                {
+                                    var resolvedSourceExpr = sourceExpr;
+                                    while (resolvedSourceExpr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
+                                    {
+                                        resolvedSourceExpr = replaced;
+                                    }
+
+                                    var itemExpressions = new List<ExpressionSyntax>();
+
+                                    if (resolvedSourceExpr is CollectionExpressionSyntax collectionExpr)
+                                    {
+                                        foreach (var element in collectionExpr.Elements)
+                                        {
+                                            if (element is ExpressionElementSyntax exprElem)
+                                            {
+                                                itemExpressions.Add(exprElem.Expression);
+                                            }
+                                        }
+                                    }
+                                    else if (resolvedSourceExpr is ArrayCreationExpressionSyntax arrayExpr && arrayExpr.Initializer != null)
+                                    {
+                                        itemExpressions.AddRange(arrayExpr.Initializer.Expressions);
+                                    }
+                                    else if (resolvedSourceExpr is ImplicitArrayCreationExpressionSyntax implicitArrayExpr && implicitArrayExpr.Initializer != null)
+                                    {
+                                        itemExpressions.AddRange(implicitArrayExpr.Initializer.Expressions);
+                                    }
+                                    else if (resolvedSourceExpr is ObjectCreationExpressionSyntax objectCreation && objectCreation.Initializer != null)
+                                    {
+                                        itemExpressions.AddRange(objectCreation.Initializer.Expressions);
+                                    }
+
+                                    if (itemExpressions.Count == 0)
+                                    {
+                                        for (int i = 1; i <= 3; i++)
+                                        {
+                                            var dummyText = $"Item {i}";
+                                            var dummyLit = Microsoft.CodeAnalysis.CSharp.SyntaxFactory.LiteralExpression(
+                                                Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression,
+                                                Microsoft.CodeAnalysis.CSharp.SyntaxFactory.Literal(dummyText));
+                                            itemExpressions.Add(dummyLit);
+                                        }
+                                    }
+
+                                    var collectionGroup = new AstElement { Name = "$$CollectionGroup$$" };
+                                    foreach (var itemExpr in itemExpressions)
+                                    {
+                                        var newReplacements = parameterReplacements == null 
+                                            ? new Dictionary<string, ExpressionSyntax>() 
+                                            : new Dictionary<string, ExpressionSyntax>(parameterReplacements);
+                                        newReplacements[lambdaParamName] = itemExpr;
+
+                                        var parsedItem = ParseExpression(lambdaBodyExpr, classDecl, newReplacements, expandingMethods, expandingParameters);
+                                        if (parsedItem != null)
+                                        {
+                                            collectionGroup.Children.Add(parsedItem);
+                                        }
+                                    }
+
+                                    return collectionGroup;
+                                }
+                            }
+                        }
+                    }
+
                     var baseElem = ParseExpression(memberAccess.Expression, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
                     if (baseElem != null)
                     {
-                        var methodName = memberAccess.Name.Identifier.Text;
-
                         var argTexts = new List<string>();
 
                         foreach (var arg in invocation.ArgumentList.Arguments)
@@ -258,6 +399,99 @@ namespace Reactor.VisualStudio.Services
                         return baseElem;
                     }
                 }
+            }
+
+            if (expr is ObjectCreationExpressionSyntax objCreation)
+            {
+                var typeName = objCreation.Type.ToString();
+                string name = typeName;
+                string? genericTypeArgs = null;
+
+                if (objCreation.Type is GenericNameSyntax genericName)
+                {
+                    name = genericName.Identifier.Text;
+                    genericTypeArgs = string.Join(", ", genericName.TypeArgumentList.Arguments.Select(a => a.ToString()));
+                }
+
+                var customComponent = FindClassDeclaration(classDecl?.Parent ?? classDecl, name);
+                if (customComponent != null && IsComponentClass(customComponent))
+                {
+                    var subReplacements = new Dictionary<string, ExpressionSyntax>();
+
+                    if (objCreation.Initializer != null)
+                    {
+                        foreach (var initExpr in objCreation.Initializer.Expressions)
+                        {
+                            if (initExpr is AssignmentExpressionSyntax assignment)
+                            {
+                                var propName = assignment.Left.ToString().Trim();
+                                var propValueExpr = assignment.Right;
+
+                                if (propValueExpr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
+                                {
+                                    propValueExpr = replaced;
+                                }
+
+                                subReplacements[propName] = propValueExpr;
+                            }
+                        }
+                    }
+
+                    var renderedSub = ParseSubComponentRender(customComponent, subReplacements, expandingMethods, expandingParameters);
+                    if (renderedSub != null)
+                    {
+                        var compElem = new AstElement { Name = "Component" };
+                        if (genericTypeArgs != null)
+                        {
+                            compElem.Properties["GenericType"] = genericTypeArgs;
+                        }
+                        else
+                        {
+                            compElem.Properties["GenericType"] = name;
+                        }
+                        compElem.Children.Add(renderedSub);
+                        return compElem;
+                    }
+                }
+
+                var elem = new AstElement { Name = name };
+                if (genericTypeArgs != null)
+                {
+                    elem.Properties["GenericType"] = genericTypeArgs;
+                }
+
+                if (objCreation.ArgumentList != null)
+                {
+                    ParseArguments(elem, objCreation.ArgumentList.Arguments, classDecl, parameterReplacements, expandingMethods, expandingParameters);
+                }
+
+                if (objCreation.Initializer != null)
+                {
+                    foreach (var expression in objCreation.Initializer.Expressions)
+                    {
+                        if (expression is AssignmentExpressionSyntax assignment)
+                        {
+                            var propName = assignment.Left.ToString().Trim();
+                            var propValueExpr = assignment.Right;
+
+                            if (propValueExpr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
+                            {
+                                propValueExpr = replaced;
+                            }
+
+                            if (TryGetConstantString(propValueExpr, out var constString, parameterReplacements))
+                            {
+                                elem.Properties[propName] = constString;
+                            }
+                            else
+                            {
+                                elem.Properties[propName] = propValueExpr.ToString().Trim();
+                            }
+                        }
+                    }
+                }
+
+                return elem;
             }
 
             if (expr is ParenthesizedExpressionSyntax parenthesized)
@@ -295,6 +529,82 @@ namespace Reactor.VisualStudio.Services
             var methodDecl = classDecl?.Members
                                         .OfType<MethodDeclarationSyntax>()
                                         .FirstOrDefault(m => m.Identifier.Text == methodName);
+
+            if (methodDecl == null)
+            {
+                var localFunc = classDecl?.DescendantNodes()
+                                           .OfType<LocalFunctionStatementSyntax>()
+                                           .FirstOrDefault(m => m.Identifier.Text == methodName);
+
+                if (localFunc != null)
+                {
+                    if (expandingMethods != null && expandingMethods.Contains(methodName))
+                    {
+                        return null;
+                    }
+
+                    var localReturnTypeName = localFunc.ReturnType.ToString();
+                    bool localReturnsElement = localReturnTypeName.Contains("Element") || localReturnTypeName.Contains("VisualNode");
+
+                    if (!localReturnsElement)
+                    {
+                        return null;
+                    }
+
+                    var localReplacements = new Dictionary<string, ExpressionSyntax>();
+                    var localParameters = localFunc.ParameterList.Parameters;
+
+                    for (int i = 0; i < invocation.ArgumentList.Arguments.Count; i++)
+                    {
+                        var arg = invocation.ArgumentList.Arguments[i];
+                        var argExpr = arg.Expression;
+
+                        if (argExpr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var parentExpr))
+                        {
+                            argExpr = parentExpr;
+                        }
+
+                        if (arg.NameColon != null)
+                        {
+                            var name = arg.NameColon.Name.Identifier.Text;
+                            localReplacements[name] = argExpr;
+                        }
+                        else if (i < localParameters.Count)
+                        {
+                            var name = localParameters[i].Identifier.Text;
+                            localReplacements[name] = argExpr;
+                        }
+                    }
+
+                    ExpressionSyntax? localBodyExpression = null;
+
+                    if (localFunc.ExpressionBody != null)
+                    {
+                        localBodyExpression = localFunc.ExpressionBody.Expression;
+                    }
+                    else if (localFunc.Body != null)
+                    {
+                        var returnStatement = localFunc.Body.Statements
+                                                                .OfType<ReturnStatementSyntax>()
+                                                                .FirstOrDefault();
+
+                        if (returnStatement != null)
+                        {
+                            localBodyExpression = returnStatement.Expression;
+                        }
+                    }
+
+                    if (localBodyExpression == null)
+                    {
+                        return null;
+                    }
+
+                    var localNextExpanding = expandingMethods == null ? new HashSet<string>() : new HashSet<string>(expandingMethods);
+                    localNextExpanding.Add(methodName);
+
+                    return ParseExpression(localBodyExpression, classDecl, localReplacements, localNextExpanding, expandingParameters: null);
+                }
+            }
 
             if (methodDecl == null || (expandingMethods != null && expandingMethods.Contains(methodName)))
             {
@@ -403,7 +713,7 @@ namespace Reactor.VisualStudio.Services
                                 propValueExpr = replaced;
                             }
 
-                            if (TryGetConstantString(propValueExpr, out var constString, parameterReplacements))
+                            if (TryGetConstantString(propValueExpr, out var constString, parameterReplacements, classDecl: classDecl))
                             {
                                 baseElem.Properties[propName] = constString;
                             }
@@ -495,13 +805,10 @@ namespace Reactor.VisualStudio.Services
 
             var child = ParseExpression(argExpr, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
-            if (child != null)
+            AddChildElement(elem, child);
+            if (child == null)
             {
-                elem.Children.Add(child);
-            }
-            else
-            {
-                if (TryGetConstantString(argExpr, out var constString, parameterReplacements))
+                if (TryGetConstantString(argExpr, out var constString, parameterReplacements, classDecl: classDecl))
                 {
                     elem.Content = constString;
                 }
@@ -539,11 +846,8 @@ namespace Reactor.VisualStudio.Services
 
             var child = ParseExpression(argExpr, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
-            if (child != null)
-            {
-                elem.Children.Add(child);
-            }
-            else
+            AddChildElement(elem, child);
+            if (child == null)
             {
                 var isSectionHeaderDesc = elem.Name.Equals("SectionHeader", StringComparison.OrdinalIgnoreCase) && 
                     ((argName != null && argName.Equals("description", StringComparison.OrdinalIgnoreCase)) || (argName == null && index == 1));
@@ -556,7 +860,7 @@ namespace Reactor.VisualStudio.Services
 
                 if (isSectionHeaderDesc)
                 {
-                    if (TryGetConstantString(argExpr, out var constString, parameterReplacements))
+                    if (TryGetConstantString(argExpr, out var constString, parameterReplacements, classDecl: classDecl))
                     {
                         elem.Properties["Description"] = constString;
                     }
@@ -575,7 +879,7 @@ namespace Reactor.VisualStudio.Services
                 }
                 else if (argName != null)
                 {
-                    if (TryGetConstantString(argExpr, out var constString, parameterReplacements))
+                    if (TryGetConstantString(argExpr, out var constString, parameterReplacements, classDecl: classDecl))
                     {
                         elem.Properties[argName] = constString;
                     }
@@ -606,31 +910,54 @@ namespace Reactor.VisualStudio.Services
             ExpressionSyntax expr,
             out string value,
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
-            HashSet<string>? expandingParameters = null)
+            HashSet<string>? expandingParameters = null,
+            ClassDeclarationSyntax? classDecl = null)
         {
-            if (expr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
+            if (expr is IdentifierNameSyntax id)
             {
-                var parameterName = id.Identifier.Text;
-
-                if (expandingParameters != null && expandingParameters.Contains(parameterName))
+                var idText = id.Identifier.Text;
+                if (parameterReplacements != null && parameterReplacements.TryGetValue(idText, out var replaced))
                 {
-                    value = string.Empty;
+                    var parameterName = idText;
 
-                    return false;
+                    if (expandingParameters != null && expandingParameters.Contains(parameterName))
+                    {
+                        value = string.Empty;
+
+                        return false;
+                    }
+
+                    var nextExpandingParameters = expandingParameters == null
+                        ? new HashSet<string>(StringComparer.Ordinal)
+                        : new HashSet<string>(expandingParameters, StringComparer.Ordinal);
+
+                    nextExpandingParameters.Add(parameterName);
+
+                    return TryGetConstantString(replaced, out value, parameterReplacements, nextExpandingParameters, classDecl);
                 }
 
-                var nextExpandingParameters = expandingParameters == null
-                    ? new HashSet<string>(StringComparer.Ordinal)
-                    : new HashSet<string>(expandingParameters, StringComparer.Ordinal);
+                if (classDecl != null)
+                {
+                    var prop = classDecl.Members.OfType<PropertyDeclarationSyntax>()
+                                         .FirstOrDefault(p => p.Identifier.Text == idText);
+                    if (prop?.Initializer != null)
+                    {
+                        return TryGetConstantString(prop.Initializer.Value, out value, parameterReplacements, expandingParameters, classDecl);
+                    }
 
-                nextExpandingParameters.Add(parameterName);
-
-                return TryGetConstantString(replaced, out value, parameterReplacements, nextExpandingParameters);
+                    var field = classDecl.Members.OfType<FieldDeclarationSyntax>()
+                                          .FirstOrDefault(f => f.Declaration.Variables.Any(v => v.Identifier.Text == idText));
+                    var variable = field?.Declaration.Variables.FirstOrDefault(v => v.Identifier.Text == idText);
+                    if (variable?.Initializer != null)
+                    {
+                        return TryGetConstantString(variable.Initializer.Value, out value, parameterReplacements, expandingParameters, classDecl);
+                    }
+                }
             }
 
             if (expr is ConditionalExpressionSyntax conditional)
             {
-                return TryGetConstantString(conditional.WhenFalse, out value, parameterReplacements, expandingParameters);
+                return TryGetConstantString(conditional.WhenFalse, out value, parameterReplacements, expandingParameters, classDecl);
             }
 
             if (expr is LiteralExpressionSyntax literal && literal.Token.IsKind(SyntaxKind.StringLiteralToken))
@@ -642,7 +969,7 @@ namespace Reactor.VisualStudio.Services
 
             if (expr is BinaryExpressionSyntax binary && binary.OperatorToken.IsKind(SyntaxKind.PlusToken))
             {
-                if (TryGetConstantString(binary.Left, out var left, parameterReplacements, expandingParameters) && TryGetConstantString(binary.Right, out var right, parameterReplacements, expandingParameters))
+                if (TryGetConstantString(binary.Left, out var left, parameterReplacements, expandingParameters, classDecl) && TryGetConstantString(binary.Right, out var right, parameterReplacements, expandingParameters, classDecl))
                 {
                     value = left + right;
 
@@ -663,7 +990,7 @@ namespace Reactor.VisualStudio.Services
                     }
                     else if (content is InterpolationSyntax interpolation)
                     {
-                        if (TryGetConstantString(interpolation.Expression, out var resolvedExpr, parameterReplacements, expandingParameters))
+                        if (TryGetConstantString(interpolation.Expression, out var resolvedExpr, parameterReplacements, expandingParameters, classDecl))
                         {
                             builder.Append(resolvedExpr);
                         }
@@ -692,12 +1019,90 @@ namespace Reactor.VisualStudio.Services
 
             if (expr is ParenthesizedExpressionSyntax parenthesized)
             {
-                return TryGetConstantString(parenthesized.Expression, out value, parameterReplacements, expandingParameters);
+                return TryGetConstantString(parenthesized.Expression, out value, parameterReplacements, expandingParameters, classDecl);
             }
 
             value = string.Empty;
 
             return false;
+        }
+
+        private static void AddChildElement(AstElement parent, AstElement? child)
+        {
+            if (child == null)
+            {
+                return;
+            }
+
+            if (child.Name == "$$CollectionGroup$$")
+            {
+                foreach (var grandChild in child.Children)
+                {
+                    AddChildElement(parent, grandChild);
+                }
+            }
+            else
+            {
+                parent.Children.Add(child);
+            }
+        }
+
+        private static ClassDeclarationSyntax? FindClassDeclaration(SyntaxNode? node, string name)
+        {
+            if (node == null)
+            {
+                return null;
+            }
+
+            return node.SyntaxTree.GetRoot().DescendantNodes()
+                       .OfType<ClassDeclarationSyntax>()
+                       .FirstOrDefault(c => c.Identifier.Text == name);
+        }
+
+        private static bool IsComponentClass(ClassDeclarationSyntax classDecl)
+        {
+            return classDecl.BaseList != null && classDecl.BaseList.Types.Any(t => t.ToString().Contains("Component"));
+        }
+
+        private static AstElement? ParseSubComponentRender(
+            ClassDeclarationSyntax classDecl,
+            Dictionary<string, ExpressionSyntax> parameterReplacements,
+            HashSet<string>? expandingMethods,
+            HashSet<string>? expandingParameters)
+        {
+            var renderMethod = classDecl.Members
+                                        .OfType<MethodDeclarationSyntax>()
+                                        .FirstOrDefault(m => m.Identifier.Text == "Render");
+
+            if (renderMethod == null)
+            {
+                return null;
+            }
+
+            ExpressionSyntax? bodyExpression = null;
+
+            if (renderMethod.ExpressionBody != null)
+            {
+                bodyExpression = renderMethod.ExpressionBody.Expression;
+            }
+            else if (renderMethod.Body != null)
+            {
+                var returnStatement = renderMethod.Body.Statements
+                                                        .OfType<ReturnStatementSyntax>()
+                                                        .FirstOrDefault();
+
+                if (returnStatement != null)
+                {
+                    bodyExpression = returnStatement.Expression;
+                }
+            }
+
+            if (bodyExpression != null)
+            {
+                return ParseExpression(bodyExpression, classDecl, parameterReplacements, expandingMethods, expandingParameters);
+            }
+
+            return null;
         }
     }
 }

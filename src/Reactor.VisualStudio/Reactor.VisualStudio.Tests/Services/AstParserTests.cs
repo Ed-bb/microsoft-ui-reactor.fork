@@ -524,7 +524,7 @@ namespace Reactor.VisualStudio.Services
                     {
                         public override VisualNode Render() =>
                             WrapGrid(
-                                Enumerable.Range(0, 5).Select(i => TextBlock(i.ToString())).ToArray()
+                                dynamicSource.GetChildren()
                             );
                     }
                 }";
@@ -539,7 +539,7 @@ namespace Reactor.VisualStudio.Services
 
             ast.Children[0].Name.ShouldBe("CodeExpressionPlaceholder");
 
-            ast.Children[0].Content.ShouldBe("Enumerable.Range(0, 5).Select(i => TextBlock(i.ToString())).ToArray()");
+            ast.Children[0].Content.ShouldBe("dynamicSource.GetChildren()");
 
             var html = HtmlRenderer.GeneratePreviewHtml(ast, new System.Collections.Generic.List<string>(), "MyWidget");
 
@@ -547,7 +547,7 @@ namespace Reactor.VisualStudio.Services
 
             html.ShouldContain("Code Execution Required");
 
-            html.ShouldContain("Enumerable.Range(0, 5).Select(i =&gt; TextBlock(i.ToString())).ToArray()");
+            html.ShouldContain("dynamicSource.GetChildren()");
         }
 
         /// <summary>
@@ -725,6 +725,143 @@ namespace Reactor.VisualStudio.Services
 
             // Verify child backdrop container has acrylic backdrop class
             html.ShouldContain("backdrop-container backdrop-acrylic");
+        }
+
+        /// <summary>
+        /// Verifies that LINQ Select expressions are expanded and flattened.
+        /// </summary>
+        [Test]
+        public void ParseAst_LinqSelect_ShouldFlattenChildren()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                using System.Linq;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render() =>
+                            VStack(
+                                new[] { ""A"", ""B"" }.Select(x => Button(x)).ToArray()
+                            );
+                    }
+                }";
+
+            var ast = AstParser.ParseAst(code, "MyWidget");
+
+            ast.ShouldNotBeNull();
+            ast.Name.ShouldBe("VStack");
+            ast.Children.Count.ShouldBe(2);
+            ast.Children[0].Name.ShouldBe("Button");
+            ast.Children[0].Content.ShouldBe("A");
+            ast.Children[1].Name.ShouldBe("Button");
+            ast.Children[1].Content.ShouldBe("B");
+        }
+
+        /// <summary>
+        /// Verifies that subcomponents instantiated with generic DSL Component helper
+        /// or object creation syntax are correctly expanded.
+        /// </summary>
+        [Test]
+        public void ParseAst_SubComponent_ShouldExpandAndInheritProperties()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render() =>
+                            VStack(
+                                Component<MySub>(),
+                                new MySub { Message = ""Custom"" }
+                            );
+                    }
+
+                    public class MySub : Component
+                    {
+                        public string Message { get; set; } = ""Default"";
+                        public override VisualNode Render() => TextBlock(Message);
+                    }
+                }";
+
+            var ast = AstParser.ParseAst(code, "MyWidget");
+
+            ast.ShouldNotBeNull();
+            ast.Name.ShouldBe("VStack");
+            ast.Children.Count.ShouldBe(2);
+
+            var firstSub = ast.Children[0];
+            firstSub.Name.ShouldBe("Component");
+            firstSub.Properties["GenericType"].ShouldBe("MySub");
+            firstSub.Children.Count.ShouldBe(1);
+            firstSub.Children[0].Name.ShouldBe("TextBlock");
+            firstSub.Children[0].Content.ShouldBe("Default");
+
+            var secondSub = ast.Children[1];
+            secondSub.Name.ShouldBe("Component");
+            secondSub.Properties["GenericType"].ShouldBe("MySub");
+            secondSub.Children.Count.ShouldBe(1);
+            secondSub.Children[0].Name.ShouldBe("TextBlock");
+            secondSub.Children[0].Content.ShouldBe("Custom");
+        }
+
+        /// <summary>
+        /// Verifies that local functions defined inside the Render method are resolved.
+        /// </summary>
+        [Test]
+        public void ParseAst_LocalFunction_ShouldResolveInline()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render()
+                        {
+                            VisualNode Item(string title) => Button(title);
+                            return VStack(Item(""Local Button""));
+                        }
+                    }
+                }";
+
+            var ast = AstParser.ParseAst(code, "MyWidget");
+
+            ast.ShouldNotBeNull();
+            ast.Name.ShouldBe("VStack");
+            ast.Children.Count.ShouldBe(1);
+            ast.Children[0].Name.ShouldBe("Button");
+            ast.Children[0].Content.ShouldBe("Local Button");
+        }
+
+        /// <summary>
+        /// Verifies that Control wrappers representing native WinRT controls parse and render.
+        /// </summary>
+        [Test]
+        public void ParseAndRender_WinRTControl_ShouldProduceStyledHtml()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render() =>
+                            new Control<MyWinRTControl> { Width = 150 };
+                    }
+                }";
+
+            var ast = AstParser.ParseAst(code, "MyWidget");
+
+            ast.ShouldNotBeNull();
+            ast.Name.ShouldBe("Control");
+            ast.Properties["GenericType"].ShouldBe("MyWinRTControl");
+            ast.Properties["Width"].ShouldBe("150");
+
+            var html = HtmlRenderer.GeneratePreviewHtml(ast, new System.Collections.Generic.List<string>(), "MyWidget");
+            html.ShouldContain("winrt-control-container");
+            html.ShouldContain("WinRT Control &lt;MyWinRTControl&gt;");
         }
     }
 }
