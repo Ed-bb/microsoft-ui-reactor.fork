@@ -13,6 +13,7 @@
     <PackageReference Include="Moq" Version="4.20.70" />
     <PackageReference Include="Shouldly" Version="4.2.1" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.11.40262" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Reactor.VisualStudio\Reactor.VisualStudio.csproj" />

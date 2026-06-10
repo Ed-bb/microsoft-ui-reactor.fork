@@ -2,7 +2,8 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
-             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:scm="clr-namespace:System.ComponentModel;assembly=WindowsBase"
              mc:Ignorable="d" 
              d:DesignHeight="450" d:DesignWidth="300">
     <Grid Name="MainGrid">
@@ -11,13 +12,38 @@
                 <CollectionViewSource.GroupDescriptions>
                     <PropertyGroupDescription PropertyName="TypeGroup" />
                 </CollectionViewSource.GroupDescriptions>
+                <CollectionViewSource.SortDescriptions>
+                    <scm:SortDescription PropertyName="TypeGroup" />
+                    <scm:SortDescription PropertyName="DisplayName" />
+                </CollectionViewSource.SortDescriptions>
             </CollectionViewSource>
         </Grid.Resources>
 
         <ListView Name="ComponentsListView"
                   ItemsSource="{Binding Source={StaticResource GroupedItems}}"
                   Background="Transparent"
-                  BorderThickness="0">
+                  BorderThickness="0"
+                  PreviewMouseLeftButtonDown="OnListViewPreviewMouseLeftButtonDown"
+                  MouseMove="OnListViewMouseMove">
+            <ListView.Resources>
+                <ContextMenu x:Key="ItemContextMenu"
+                             x:Shared="true"
+                             Background="{DynamicResource {x:Static SystemColors.MenuBrushKey}}"
+                             Foreground="{DynamicResource {x:Static SystemColors.MenuTextBrushKey}}"
+                             BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}">
+                    <MenuItem Header="Go to Implementation"
+                              Click="OnGoToImplementationClick"
+                              IsEnabled="{Binding HasSourceFile}" />
+                    <MenuItem Header="Insert code"
+                              Click="OnInsertCodeClick" />
+                </ContextMenu>
+            </ListView.Resources>
+            <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    <Setter Property="ContextMenu" Value="{StaticResource ItemContextMenu}" />
+                </Style>
+            </ListView.ItemContainerStyle>
             <ListView.GroupStyle>
                 <GroupStyle>
                     <GroupStyle.HeaderTemplate>
@@ -31,9 +57,10 @@
             </ListView.GroupStyle>
             <ListView.ItemTemplate>
                 <DataTemplate>
-                    <TextBlock Text="{Binding Name}" 
+                    <TextBlock Text="{Binding DisplayName}" 
+                               ToolTip="{Binding SourceFileName}"
                                Padding="15,2,5,2" 
-                               FontSize="12"/>
+                               FontSize="12" />
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>

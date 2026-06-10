@@ -32,6 +32,52 @@ namespace Reactor.VisualStudio.Services
         }
 
         /// <summary>
+        /// Verifies that AstParser can resolve interpolated strings when variables are parameters.
+        /// </summary>
+        [Test]
+        public void ParseAst_InterpolatedString_ShouldResolveWithParameter()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render() => MyHelper(""World"");
+
+                        private VisualNode MyHelper(string name) => TextBlock($""Hello {name}!"");
+                    }
+                }";
+            var result = AstParser.ParseAst(code, "MyWidget");
+
+            result.ShouldNotBeNull();
+            result.Name.ShouldBe("TextBlock");
+            result.Content.ShouldBe("Hello World!");
+        }
+
+        /// <summary>
+        /// Verifies that AstParser uses the original string expression representation when it cannot resolve the interpolation.
+        /// </summary>
+        [Test]
+        public void ParseAst_InterpolatedString_ShouldUseOriginalIfUnresolvable()
+        {
+            var code = @"
+                using Microsoft.UI.Reactor;
+                namespace MyApp
+                {
+                    public class MyWidget : Component
+                    {
+                        public override VisualNode Render() => TextBlock($""Hello {System.DateTime.Now}!"");
+                    }
+                }";
+            var result = AstParser.ParseAst(code, "MyWidget");
+
+            result.ShouldNotBeNull();
+            result.Name.ShouldBe("TextBlock");
+            result.Content.ShouldBe(@"$""Hello {System.DateTime.Now}!""");
+        }
+
+        /// <summary>
         /// Verifies that CheckBox maps the label argument at index 2 correctly.
         /// </summary>
         [Test]

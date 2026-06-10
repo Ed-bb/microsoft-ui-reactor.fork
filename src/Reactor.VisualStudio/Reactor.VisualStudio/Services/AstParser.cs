@@ -175,7 +175,8 @@ namespace Reactor.VisualStudio.Services
             ExpressionSyntax expr,
             ClassDeclarationSyntax? classDecl = null,
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
-            HashSet<string>? expandingMethods = null)
+            HashSet<string>? expandingMethods = null,
+            HashSet<string>? expandingParameters = null)
         {
             if (expr == null)
             {
@@ -184,14 +185,27 @@ namespace Reactor.VisualStudio.Services
 
             if (expr is IdentifierNameSyntax exprId && parameterReplacements != null && parameterReplacements.TryGetValue(exprId.Identifier.Text, out var replacedExpr))
             {
-                return ParseExpression(replacedExpr, classDecl, parameterReplacements, expandingMethods);
+                var parameterName = exprId.Identifier.Text;
+
+                if (expandingParameters != null && expandingParameters.Contains(parameterName))
+                {
+                    return null;
+                }
+
+                var nextExpandingParameters = expandingParameters == null
+                    ? new HashSet<string>(StringComparer.Ordinal)
+                    : new HashSet<string>(expandingParameters, StringComparer.Ordinal);
+
+                nextExpandingParameters.Add(parameterName);
+
+                return ParseExpression(replacedExpr, classDecl, parameterReplacements, expandingMethods, nextExpandingParameters);
             }
 
             if (expr is InvocationExpressionSyntax invocation)
             {
                 if (invocation.Expression is SimpleNameSyntax simpleName)
                 {
-                    var resolvedMethodElement = ParseClassMethodInvocation(invocation, simpleName, classDecl, parameterReplacements, expandingMethods);
+                    var resolvedMethodElement = ParseClassMethodInvocation(invocation, simpleName, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
                     if (resolvedMethodElement != null)
                     {
@@ -212,14 +226,14 @@ namespace Reactor.VisualStudio.Services
                         }
                     }
 
-                    ParseArguments(elem, invocation.ArgumentList.Arguments, classDecl, parameterReplacements, expandingMethods);
+                    ParseArguments(elem, invocation.ArgumentList.Arguments, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
                     return elem;
                 }
 
                 if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
                 {
-                    var baseElem = ParseExpression(memberAccess.Expression, classDecl, parameterReplacements, expandingMethods);
+                    var baseElem = ParseExpression(memberAccess.Expression, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
                     if (baseElem != null)
                     {
@@ -248,12 +262,12 @@ namespace Reactor.VisualStudio.Services
 
             if (expr is ParenthesizedExpressionSyntax parenthesized)
             {
-                return ParseExpression(parenthesized.Expression, classDecl, parameterReplacements, expandingMethods);
+                return ParseExpression(parenthesized.Expression, classDecl, parameterReplacements, expandingMethods, expandingParameters);
             }
 
             if (expr is WithExpressionSyntax withExpr)
             {
-                return ParseWithExpression(withExpr, classDecl, parameterReplacements, expandingMethods);
+                return ParseWithExpression(withExpr, classDecl, parameterReplacements, expandingMethods, expandingParameters);
             }
 
             return null;
@@ -273,7 +287,8 @@ namespace Reactor.VisualStudio.Services
             SimpleNameSyntax simpleName,
             ClassDeclarationSyntax? classDecl,
             Dictionary<string, ExpressionSyntax>? parameterReplacements,
-            HashSet<string>? expandingMethods)
+            HashSet<string>? expandingMethods,
+            HashSet<string>? expandingParameters)
         {
             var methodName = simpleName.Identifier.Text;
 
@@ -351,7 +366,7 @@ namespace Reactor.VisualStudio.Services
 
             nextExpanding.Add(methodName);
 
-            return ParseExpression(bodyExpression, classDecl, newReplacements, nextExpanding);
+            return ParseExpression(bodyExpression, classDecl, newReplacements, nextExpanding, expandingParameters: null);
         }
 
         /// <summary>
@@ -366,9 +381,10 @@ namespace Reactor.VisualStudio.Services
             WithExpressionSyntax withExpr,
             ClassDeclarationSyntax? classDecl = null,
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
-            HashSet<string>? expandingMethods = null)
+            HashSet<string>? expandingMethods = null,
+            HashSet<string>? expandingParameters = null)
         {
-            var baseElem = ParseExpression(withExpr.Expression, classDecl, parameterReplacements, expandingMethods);
+            var baseElem = ParseExpression(withExpr.Expression, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
             if (baseElem != null)
             {
@@ -418,7 +434,8 @@ namespace Reactor.VisualStudio.Services
             SeparatedSyntaxList<ArgumentSyntax> arguments,
             ClassDeclarationSyntax? classDecl = null,
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
-            HashSet<string>? expandingMethods = null)
+            HashSet<string>? expandingMethods = null,
+            HashSet<string>? expandingParameters = null)
         {
             for (int i = 0; i < arguments.Count; i++)
             {
@@ -430,11 +447,11 @@ namespace Reactor.VisualStudio.Services
 
                 if (IsTextArgument(elem.Name, argName, i, argExpr))
                 {
-                    ParseTextArgument(elem, argExpr, classDecl, parameterReplacements, expandingMethods);
+                    ParseTextArgument(elem, argExpr, classDecl, parameterReplacements, expandingMethods, expandingParameters);
                 }
                 else
                 {
-                    ParseNonTextArgument(elem, argExpr, argName, i, classDecl, parameterReplacements, expandingMethods);
+                    ParseNonTextArgument(elem, argExpr, argName, i, classDecl, parameterReplacements, expandingMethods, expandingParameters);
                 }
             }
         }
@@ -452,7 +469,8 @@ namespace Reactor.VisualStudio.Services
             ExpressionSyntax argExpr,
             ClassDeclarationSyntax? classDecl = null,
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
-            HashSet<string>? expandingMethods = null)
+            HashSet<string>? expandingMethods = null,
+            HashSet<string>? expandingParameters = null)
         {
             while (true)
             {
@@ -475,7 +493,7 @@ namespace Reactor.VisualStudio.Services
                 argExpr = replaced;
             }
 
-            var child = ParseExpression(argExpr, classDecl, parameterReplacements, expandingMethods);
+            var child = ParseExpression(argExpr, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
             if (child != null)
             {
@@ -511,14 +529,15 @@ namespace Reactor.VisualStudio.Services
             int index,
             ClassDeclarationSyntax? classDecl = null,
             Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
-            HashSet<string>? expandingMethods = null)
+            HashSet<string>? expandingMethods = null,
+            HashSet<string>? expandingParameters = null)
         {
             if (argExpr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
             {
                 argExpr = replaced;
             }
 
-            var child = ParseExpression(argExpr, classDecl, parameterReplacements, expandingMethods);
+            var child = ParseExpression(argExpr, classDecl, parameterReplacements, expandingMethods, expandingParameters);
 
             if (child != null)
             {
@@ -586,16 +605,32 @@ namespace Reactor.VisualStudio.Services
         private static bool TryGetConstantString(
             ExpressionSyntax expr,
             out string value,
-            Dictionary<string, ExpressionSyntax>? parameterReplacements = null)
+            Dictionary<string, ExpressionSyntax>? parameterReplacements = null,
+            HashSet<string>? expandingParameters = null)
         {
             if (expr is IdentifierNameSyntax id && parameterReplacements != null && parameterReplacements.TryGetValue(id.Identifier.Text, out var replaced))
             {
-                return TryGetConstantString(replaced, out value, parameterReplacements);
+                var parameterName = id.Identifier.Text;
+
+                if (expandingParameters != null && expandingParameters.Contains(parameterName))
+                {
+                    value = string.Empty;
+
+                    return false;
+                }
+
+                var nextExpandingParameters = expandingParameters == null
+                    ? new HashSet<string>(StringComparer.Ordinal)
+                    : new HashSet<string>(expandingParameters, StringComparer.Ordinal);
+
+                nextExpandingParameters.Add(parameterName);
+
+                return TryGetConstantString(replaced, out value, parameterReplacements, nextExpandingParameters);
             }
 
             if (expr is ConditionalExpressionSyntax conditional)
             {
-                return TryGetConstantString(conditional.WhenFalse, out value, parameterReplacements);
+                return TryGetConstantString(conditional.WhenFalse, out value, parameterReplacements, expandingParameters);
             }
 
             if (expr is LiteralExpressionSyntax literal && literal.Token.IsKind(SyntaxKind.StringLiteralToken))
@@ -607,7 +642,7 @@ namespace Reactor.VisualStudio.Services
 
             if (expr is BinaryExpressionSyntax binary && binary.OperatorToken.IsKind(SyntaxKind.PlusToken))
             {
-                if (TryGetConstantString(binary.Left, out var left, parameterReplacements) && TryGetConstantString(binary.Right, out var right, parameterReplacements))
+                if (TryGetConstantString(binary.Left, out var left, parameterReplacements, expandingParameters) && TryGetConstantString(binary.Right, out var right, parameterReplacements, expandingParameters))
                 {
                     value = left + right;
 
@@ -615,9 +650,49 @@ namespace Reactor.VisualStudio.Services
                 }
             }
 
+            if (expr is InterpolatedStringExpressionSyntax interpolated)
+            {
+                var builder      = new System.Text.StringBuilder();
+                bool allResolved = true;
+
+                foreach (var content in interpolated.Contents)
+                {
+                    if (content is InterpolatedStringTextSyntax text)
+                    {
+                        builder.Append(text.TextToken.ValueText);
+                    }
+                    else if (content is InterpolationSyntax interpolation)
+                    {
+                        if (TryGetConstantString(interpolation.Expression, out var resolvedExpr, parameterReplacements, expandingParameters))
+                        {
+                            builder.Append(resolvedExpr);
+                        }
+                        else
+                        {
+                            allResolved = false;
+
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        allResolved = false;
+
+                        break;
+                    }
+                }
+
+                if (allResolved)
+                {
+                    value = builder.ToString();
+
+                    return true;
+                }
+            }
+
             if (expr is ParenthesizedExpressionSyntax parenthesized)
             {
-                return TryGetConstantString(parenthesized.Expression, out value, parameterReplacements);
+                return TryGetConstantString(parenthesized.Expression, out value, parameterReplacements, expandingParameters);
             }
 
             value = string.Empty;
