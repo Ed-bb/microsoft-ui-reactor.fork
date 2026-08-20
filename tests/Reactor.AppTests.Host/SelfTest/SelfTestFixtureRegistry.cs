@@ -1528,6 +1528,23 @@ internal static class SelfTestFixtureRegistry
         "Issue495_ListView_SameLengthContentChange_RefreshesContainers",
         "Issue495_GridView_SameLengthContentChange_RefreshesContainers",
 
+        // Issue #1090 — ItemsSource rebuild strands a speculative echo-suppress
+        // token when the selection survives the swap, swallowing the user's next
+        // genuine SelectionChanged. Shared oracle for the fix bake-off.
+        "Issue1090_Probe_ItemsSourceSwapBehavior",
+        "Issue1090_ListView_SelectionSurvivesRebuild_NextSelectionFires",
+        "Issue1090_GridView_SelectionSurvivesRebuild_NextSelectionFires",
+        "Issue1090_ListView_SelectAndDeselectAcrossRebuild_BothFire",
+        "Issue1090_ListView_SelectionDroppedByRebuild_NoEchoLeak",
+        "Issue1090_Repro_GrowSourceThenSelectNewItem",
+        "Issue1090_ListView_EmptyMountThenItemsArrive_FirstRealSelectionFires",
+        "Issue1090_GridView_EmptyMountThenItemsArrive_FirstRealSelectionFires",
+        "Issue1090_ListView_IndexPastEndOfShortSource_FirstRealSelectionFires",
+        "Issue1090_GridView_IndexPastEndOfShortSource_FirstRealSelectionFires",
+        "Issue1090_ListView_ControlledIndexUnreachableAfterShrink_FirstRealSelectionFires",
+        "Issue1090_ListView_MultiSelectEmptyMount_FirstRealSelectionFires",
+        "Issue1090_TypedListView_ControlledIndexUnreachableAfterShrink_FirstRealSelectionFires",
+
         // Spec 047 §14 Phase 1 (1.16) — external-assembly proof fixtures.
         // The MarqueeHandler is authored in tests/external_proof/
         // Reactor.External.TestControl, references Reactor as a regular
@@ -1683,10 +1700,18 @@ internal static class SelfTestFixtureRegistry
         "CmdBarFlyout_UnmountDetachesFlyout",
         "CmdBarFlyout_KeyedReorderKeepsSiblingFlyouts",
         "CmdBarFlyout_TargetKeepsItsOwnCallbacks",
+
+        // The harness's own click stimulus must fail loudly (HarnessGuardFixtures, #1063).
+        "HarnessGuard_ClickButtonFailsLoudly",
+
+        // Positive control for the three-state verdict (issue #1061). Asserts nothing on purpose;
+        // its SKIPPED result is what SelfTestBatch.SkippedFixtures_AreReported checks for.
+        SkipVerdictPositiveControl.FixtureName,
     ];
 
     public static SelfTestFixtureBase? Create(string name, Harness harness) => name switch
     {
+        "HarnessGuard_ClickButtonFailsLoudly" => new HarnessGuardFixtures.ClickButtonFailsLoudly(harness),
         "ErrorBoundary_CatchesRenderError" => new ErrorBoundaryFixtures.CatchesRenderError(harness),
         "ErrorBoundary_Recovery" => new ErrorBoundaryFixtures.Recovery(harness),
         "Reconciler_MountText" => new ReconcilerFixtures.MountText(harness),
@@ -3163,6 +3188,21 @@ internal static class SelfTestFixtureRegistry
         "Issue495_ListView_SameLengthContentChange_RefreshesContainers" => new ListViewLoopReproFixtures.ListView_SameLengthContentChange_RefreshesContainers(harness),
         "Issue495_GridView_SameLengthContentChange_RefreshesContainers" => new ListViewLoopReproFixtures.GridView_SameLengthContentChange_RefreshesContainers(harness),
 
+        // Issue #1090 — echo-suppress token stranding on ItemsSource rebuild.
+        "Issue1090_Probe_ItemsSourceSwapBehavior" => new Issue1090SelectionStrandFixtures.Probe_ItemsSourceSwapBehavior(harness),
+        "Issue1090_ListView_SelectionSurvivesRebuild_NextSelectionFires" => new Issue1090SelectionStrandFixtures.ListView_SelectionSurvivesRebuild_NextSelectionFires(harness),
+        "Issue1090_GridView_SelectionSurvivesRebuild_NextSelectionFires" => new Issue1090SelectionStrandFixtures.GridView_SelectionSurvivesRebuild_NextSelectionFires(harness),
+        "Issue1090_ListView_SelectAndDeselectAcrossRebuild_BothFire" => new Issue1090SelectionStrandFixtures.ListView_SelectAndDeselectAcrossRebuild_BothFire(harness),
+        "Issue1090_ListView_SelectionDroppedByRebuild_NoEchoLeak" => new Issue1090SelectionStrandFixtures.ListView_SelectionDroppedByRebuild_NoEchoLeak(harness),
+        "Issue1090_Repro_GrowSourceThenSelectNewItem" => new Issue1090SelectionStrandFixtures.Repro_GrowSourceThenSelectNewItem(harness),
+        "Issue1090_ListView_EmptyMountThenItemsArrive_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.ListView_EmptyMountThenItemsArrive_FirstRealSelectionFires(harness),
+        "Issue1090_GridView_EmptyMountThenItemsArrive_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.GridView_EmptyMountThenItemsArrive_FirstRealSelectionFires(harness),
+        "Issue1090_ListView_IndexPastEndOfShortSource_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.ListView_IndexPastEndOfShortSource_FirstRealSelectionFires(harness),
+        "Issue1090_GridView_IndexPastEndOfShortSource_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.GridView_IndexPastEndOfShortSource_FirstRealSelectionFires(harness),
+        "Issue1090_ListView_ControlledIndexUnreachableAfterShrink_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.ListView_ControlledIndexUnreachableAfterShrink_FirstRealSelectionFires(harness),
+        "Issue1090_ListView_MultiSelectEmptyMount_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.ListView_MultiSelectEmptyMount_FirstRealSelectionFires(harness),
+        "Issue1090_TypedListView_ControlledIndexUnreachableAfterShrink_FirstRealSelectionFires" => new Issue1090SelectionStrandFixtures.TypedListView_ControlledIndexUnreachableAfterShrink_FirstRealSelectionFires(harness),
+
         // Spec 047 §14 Phase 1 (1.16) — external-assembly proof fixtures.
         "Spec047ExternalProof_Marquee_MountUpdate" => new Spec047ExternalProofFixtures.MarqueeMountUpdate(harness),
         "Spec047ExternalProof_Marquee_WriteSuppressed" => new Spec047ExternalProofFixtures.MarqueeWriteSuppressedEcho(harness),
@@ -3295,6 +3335,8 @@ internal static class SelfTestFixtureRegistry
         "CmdBarFlyout_UnmountDetachesFlyout" => new CommandBarFlyoutWiringFixtures.UnmountDetachesFlyout(harness),
         "CmdBarFlyout_KeyedReorderKeepsSiblingFlyouts" => new CommandBarFlyoutWiringFixtures.KeyedReorderKeepsSiblingFlyouts(harness),
         "CmdBarFlyout_TargetKeepsItsOwnCallbacks" => new CommandBarFlyoutWiringFixtures.TargetKeepsItsOwnCallbacks(harness),
+
+        SkipVerdictPositiveControl.FixtureName => new SkipVerdictPositiveControl(harness),
 
         _ => null,
     };

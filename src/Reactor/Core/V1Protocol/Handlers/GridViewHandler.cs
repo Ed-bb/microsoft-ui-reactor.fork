@@ -113,8 +113,16 @@ internal sealed class GridViewHandler : IElementHandler<GridViewElement, WinUI.G
         // "deselect", so write it through the same drift gate. Optional<int>.Unset
         // (HasValue == false) means "control owns the selection" and falls
         // through without a write.
+        // Issue #1090 — the drift gate alone is not enough: a write of an index
+        // that does not exist in the CURRENT ItemsSource (common on mount, while
+        // the items list is still empty) cannot be honored by WinUI. No
+        // SelectionChanged is raised, so the token armed by WriteSuppressed
+        // strands and later swallows the user's first real selection. Only write
+        // when the index is reachable; the Update that brings the items in
+        // performs the write instead, where it lands and echoes normally.
         if (gv.SelectedIndex is { HasValue: true } mountIndex
-            && gridView.SelectedIndex != mountIndex.Value)
+            && gridView.SelectedIndex != mountIndex.Value
+            && SelectionWriteGuard.CanLand(mountIndex.Value, gv.Items.Length))
         {
             ReactorBinding.WriteSuppressed(gridView, () => gridView.SelectedIndex = mountIndex.Value);
         }
@@ -146,12 +154,12 @@ internal sealed class GridViewHandler : IElementHandler<GridViewElement, WinUI.G
         // when only their content changes
         // (see Issue495_GridView_SameLengthContentChange_RefreshesContainers).
         //
-        // WinUI drops SelectedIndex to -1 on ItemsSource reassignment when
-        // there's an active selection, firing SelectionChanged(-1). Arm
+        // WinUI resets SelectedIndex to -1 on ItemsSource reassignment when
+        // there is an active selection, firing SelectionChanged(-1). Arm
         // BeginSuppress immediately before the swap so the trampoline's
         // ShouldSuppress gate consumes that transient event. Only arm when
-        // there's a selection to clear — else the token strands and
-        // swallows the next real user input. Matches the ListView fix.
+        // there is a selection to clear — else the token strands and swallows
+        // the next real user input. Matches the ListView handler.
         if (!ReferenceEquals(o.Items, n.Items))
         {
             if (gv.SelectedIndex >= 0)
@@ -177,8 +185,12 @@ internal sealed class GridViewHandler : IElementHandler<GridViewElement, WinUI.G
         // increments, ShouldSuppress only consumes on a real event, so an
         // unconsumed token swallows the next user input). Spec 050: -1 is
         // the explicit force-clear sentinel; Unset means "control owns it".
+        // Issue #1090 — same reachability guard as Mount: a write WinUI cannot
+        // honor (index past the end of the current source) raises no event, so
+        // arming for it strands a token that later eats a real selection.
         if (n.SelectedIndex is { HasValue: true } updateIndex
-            && gv.SelectedIndex != updateIndex.Value)
+            && gv.SelectedIndex != updateIndex.Value
+            && SelectionWriteGuard.CanLand(updateIndex.Value, n.Items.Length))
         {
             ReactorBinding.WriteSuppressed(gv, () => gv.SelectedIndex = updateIndex.Value);
         }

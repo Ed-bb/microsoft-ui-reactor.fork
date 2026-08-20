@@ -125,8 +125,19 @@ internal sealed class ListViewHandler : IElementHandler<ListViewElement, WinUI.L
         // "deselect", so write it through the same drift gate. Optional<int>.Unset
         // (HasValue == false) means "control owns the selection" and falls
         // through without a write.
+        //
+        // Issue #1090 — the drift gate is not sufficient on its own. A write of
+        // an index that does not exist in the CURRENT ItemsSource (very common
+        // on mount: the list is still empty while its data loads) cannot be
+        // honored by WinUI. The control stays at -1, no SelectionChanged is
+        // raised, and the token armed by WriteSuppressed strands — later
+        // swallowing the user's first real selection. Only write when the index
+        // is actually reachable; when it is not, the subsequent Update that
+        // brings the items in performs the write instead, at which point it
+        // lands and echoes normally.
         if (lv.SelectedIndex is { HasValue: true } mountIndex
-            && listView.SelectedIndex != mountIndex.Value)
+            && listView.SelectedIndex != mountIndex.Value
+            && SelectionWriteGuard.CanLand(mountIndex.Value, lv.Items.Length))
         {
             ReactorBinding.WriteSuppressed(listView, () => listView.SelectedIndex = mountIndex.Value);
         }
@@ -159,15 +170,18 @@ internal sealed class ListViewHandler : IElementHandler<ListViewElement, WinUI.L
         // would silently freeze visible items when only their content changes
         // (see Issue495_ListView_SameLengthContentChange_RefreshesContainers).
         //
-        // WinUI synchronously drops SelectedIndex to -1 on ItemsSource
-        // reassignment when there's an active selection, and fires
-        // SelectionChanged(-1). Arm BeginSuppress immediately before the
-        // swap so that transient event is consumed by the trampoline's
-        // ShouldSuppress gate instead of looping back through
-        // OnSelectedIndexChanged → setState → re-render → swap → … (the
-        // 50+-render storm reported in #495). Only arm when there's actually
-        // a selection to clear — otherwise the token strands and swallows
-        // the next real user input.
+        // WinUI resets SelectedIndex to -1 synchronously inside the assignment
+        // when there is an active selection, and fires SelectionChanged(-1).
+        // Arm BeginSuppress immediately before the swap so that transient event
+        // is consumed by the trampoline's ShouldSuppress gate instead of looping
+        // back through OnSelectedIndexChanged → setState → re-render → swap → …
+        // (the 50+-render storm reported in #495). Only arm when there is
+        // actually a selection to clear — otherwise the token strands and
+        // swallows the next real user input.
+        //
+        // Measured on both WASDK 2.1 and 2.3.1 (Issue1090_Probe_ItemsSourceSwapBehavior
+        // logs the branch this host takes): the reset happens for grow, shrink,
+        // and same-length reassignment alike, so the token is always consumed.
         if (!ReferenceEquals(o.Items, n.Items))
         {
             if (lv.SelectedIndex >= 0)
@@ -190,8 +204,13 @@ internal sealed class ListViewHandler : IElementHandler<ListViewElement, WinUI.L
         // OnSelectedIndexChanged. Only arm on real drift (see Mount comment
         // above and the GridView analog wired for issue #464). Spec 050: -1
         // is the explicit force-clear sentinel; Unset means "control owns it".
+        //
+        // Issue #1090 — same reachability guard as Mount: a write WinUI cannot
+        // honor (index past the end of the current source) raises no event, so
+        // arming for it strands a token that later eats a real selection.
         if (n.SelectedIndex is { HasValue: true } updateIndex
-            && lv.SelectedIndex != updateIndex.Value)
+            && lv.SelectedIndex != updateIndex.Value
+            && SelectionWriteGuard.CanLand(updateIndex.Value, n.Items.Length))
         {
             ReactorBinding.WriteSuppressed(lv, () => lv.SelectedIndex = updateIndex.Value);
         }

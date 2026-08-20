@@ -16,6 +16,8 @@ internal sealed class Harness
 {
     private readonly Window _window;
     private int _failures;
+    private int _checks;
+    private int _skips;
 
     // Persistent title bar with visual test-result segments
     private TextBlock? _subtitleText;
@@ -31,6 +33,17 @@ internal sealed class Harness
     public Window Window => _window;
     public int Failures => _failures;
     public void RecordFailure() => _failures++;
+
+    /// <summary>
+    /// Assertions attempted, passing or failing. Snapshotted around each fixture by
+    /// <see cref="SelfTestRunner"/> so a fixture that emitted <i>only</i> skips can be told apart
+    /// from one that actually asserted something (issue #1061). Counts the throwing overloads too:
+    /// an exception is an assertion attempt, not an absence of one.
+    /// </summary>
+    public int Checks => _checks;
+
+    /// <summary>Skip directives emitted — see <see cref="Skip"/>.</summary>
+    public int Skips => _skips;
 
     // -- TitleBar setup ---------------------------------------------------
 
@@ -179,6 +192,7 @@ internal sealed class Harness
 
     public void Check(string name, bool result)
     {
+        _checks++;
         if (result)
             Console.WriteLine($"ok {name}");
         else
@@ -189,13 +203,49 @@ internal sealed class Harness
     }
 
     /// <summary>
-    /// Emits a TAP "skipped" line for a known-failing or deferred check
-    /// without counting it as a pass OR a failure. Use for documented
-    /// gaps that have a tracking item — the assertion is explicit in
-    /// the log instead of being silently dropped.
+    /// Emits a TAP "skipped" line for a check this run cannot make, without counting it as a pass
+    /// OR a failure. The assertion stays explicit in the log instead of being silently dropped.
+    ///
+    /// <para><b>A skip is not an assertion, and the reporting layer now says so.</b> The
+    /// directive below is a TAP payload, and <c>SelfTestBatch</c> used to discard it: any line
+    /// starting <c>ok </c> satisfied the parser's <c>sawChecksForCurrent</c> guard — the flag whose
+    /// whole purpose is to catch a fixture that asserted nothing. So a fixture whose only output
+    /// was a skip reported <b>PASSED</b>, indistinguishable from one that ran and passed
+    /// (issue #1061). It is now reported <b>SKIPPED</b>: amber in the title bar, counted in the
+    /// Host's <c># Total skipped fixtures:</c> trailer, and surfaced as an MSTest skip rather than
+    /// a green tick.</para>
+    ///
+    /// <para><b>Three legitimate reasons to skip</b>, all in use today, and the reason a skip is
+    /// reported rather than failed differs for each:
+    /// <list type="bullet">
+    ///   <item><description><i>Undeterminable precondition.</i> The machine cannot answer the
+    ///     question — <c>GetCursorPos</c> on a non-interactive desktop, DWM corner attributes on
+    ///     Windows 10, focus on a headless harness. Failing these would redden the suite on
+    ///     exactly the machines the skip was introduced to accommodate.</description></item>
+    ///   <item><description><i>Coverage owned by another tier.</i> Live input cannot be
+    ///     synthesized in-process, so the leg is asserted by the E2E suite instead — e.g.
+    ///     <c>EventStateSplit_RawHatch_HandledChildParentStillFires</c>. The behaviour <i>is</i>
+    ///     covered; not here.</description></item>
+    ///   <item><description><i>A tracked product gap.</i> A real defect with an issue number, e.g.
+    ///     <c>"issue #942 - decorator retags the target"</c>. Here the product genuinely is broken
+    ///     — the skip is a deliberate, referenced deferral, not a claim of health.</description>
+    ///   </item>
+    /// </list>
+    /// Because the third case exists, <b>a skipped fixture must never be read as evidence the
+    /// product works</b> — only that this run did not establish otherwise. That is precisely why
+    /// reporting it as PASSED was a bug worth fixing, and why SKIPPED is not simply a nicer green.
+    /// Put the reason in <paramref name="reason"/>, with an issue number when there is one; it is
+    /// the only thing a reader of the skip report gets.</para>
+    ///
+    /// <para><b>Prefer an observable precondition over a bare skip.</b> When the precondition
+    /// <i>can</i> be asserted, assert it first and skip only the leg that genuinely cannot be
+    /// observed — see <c>NativeDockingA11yFixture.cs</c>, which does
+    /// <c>H.Check(focusStartsOutside)</c> before its <c>H.Skip</c> + <c>return</c>. That shape
+    /// keeps a real red available for the case where the harness itself broke.</para>
     /// </summary>
     public void Skip(string name, string reason)
     {
+        _skips++;
         Console.WriteLine($"ok {name} # SKIP {reason}");
     }
 
@@ -204,6 +254,7 @@ internal sealed class Harness
         try { Check(name, test()); }
         catch (Exception ex)
         {
+            _checks++;
             Console.WriteLine($"not ok {name} - {ex.GetType().Name}: {ex.Message}");
             _failures++;
         }
@@ -214,6 +265,7 @@ internal sealed class Harness
         try { Check(name, await test()); }
         catch (Exception ex)
         {
+            _checks++;
             Console.WriteLine($"not ok {name} - {ex.GetType().Name}: {ex.Message}");
             _failures++;
         }
@@ -362,24 +414,112 @@ internal sealed class Harness
 
     // -- Interaction helpers ----------------------------------------------
 
+    /// <summary>
+    /// Invokes the <see cref="Button"/> whose Content equals <paramref name="label"/>.
+    ///
+    /// <para>Throws when the button is missing OR disabled. A fixture is a stimulus followed
+    /// by an assertion, so a stimulus that silently does not land leaves the assertion
+    /// measuring the UNSTIMULATED state — and every assertion of the form "X was left
+    /// alone" / "X was restored" / "X is still within tolerance" passes on that state. The
+    /// fixture then goes green having exercised nothing, and "clicked it" is byte-identical
+    /// to "silently did nothing" at the call site (issue #1063).</para>
+    ///
+    /// <para>To assert that a disabled button ignores clicks, use
+    /// <see cref="RequireButtonDisabled"/> — it too throws when the label is wrong, so the
+    /// assertion cannot pass for the wrong reason.</para>
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No such button, or the button is disabled.</exception>
     public void ClickButton(string label)
     {
-        var btn = FindButton(label);
-        if (btn is not null && btn.IsEnabled)
-        {
-            var peer = new Microsoft.UI.Xaml.Automation.Peers.ButtonAutomationPeer(btn);
-            var invokeProvider = (Microsoft.UI.Xaml.Automation.Provider.IInvokeProvider)
-                peer.GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Invoke);
-            invokeProvider.Invoke();
-        }
+        var btn = RequireButton(nameof(ClickButton), label);
+        if (!btn.IsEnabled)
+            throw new InvalidOperationException(
+                $"{nameof(ClickButton)}(\"{OneLine(label)}\"): the Button is disabled, so the click was NOT " +
+                $"delivered. If the fixture means to prove that a disabled button ignores clicks, " +
+                $"call {nameof(RequireButtonDisabled)} instead.");
+
+        InvokeButton(btn);
     }
 
+    /// <summary>
+    /// Asserts that the button carrying <paramref name="label"/> is present but disabled —
+    /// and therefore that no click can land on it. Deliberately does NOT click.
+    ///
+    /// <para>This is the sanctioned way to prove "a disabled button ignores clicks". It
+    /// throws in BOTH failure directions: a wrong label and an unexpectedly ENABLED button
+    /// are each a broken fixture. That is why it returns <c>void</c> rather than a
+    /// <c>bool</c> — a returned flag can be dropped at the call site, and a silently
+    /// ignorable signal is precisely the defect this guard exists to prevent (issue #1063).
+    /// Reintroducing one here would rebuild the bug inside its own fix.</para>
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No such button, or the button is enabled.</exception>
+    public void RequireButtonDisabled(string label)
+    {
+        var btn = RequireButton(nameof(RequireButtonDisabled), label);
+        if (btn.IsEnabled)
+            throw new InvalidOperationException(
+                $"{nameof(RequireButtonDisabled)}(\"{OneLine(label)}\"): the Button is ENABLED, but the " +
+                $"fixture expected it to be disabled. A real click would land here, so whatever the " +
+                $"fixture asserts next about nothing having happened would be measuring the wrong thing.");
+    }
+
+    /// <summary>
+    /// Flips the <see cref="CheckBox"/> whose Content equals <paramref name="label"/>.
+    /// Throws when there is no such CheckBox, for the reasons in <see cref="ClickButton"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No CheckBox carries <paramref name="label"/>.</exception>
     public void ToggleCheckBox(string label)
     {
-        var cb = FindControl<CheckBox>(c => c.Content is string s && s == label);
-        if (cb is not null)
-            cb.IsChecked = cb.IsChecked != true;
+        var cb = FindControl<CheckBox>(c => c.Content is string s && s == label)
+            ?? throw new InvalidOperationException(
+                $"{nameof(ToggleCheckBox)}(\"{OneLine(label)}\"): no CheckBox with that Content is in the " +
+                $"visual tree. {DescribeContent<CheckBox>("CheckBox")}");
+
+        cb.IsChecked = cb.IsChecked is not true;
     }
+
+    private Button RequireButton(string caller, string label)
+        => FindButton(label)
+           ?? throw new InvalidOperationException(
+               $"{caller}(\"{OneLine(label)}\"): no Button with that Content is in the visual tree. " +
+               DescribeContent<Button>("Button"));
+
+    private static void InvokeButton(Button btn)
+    {
+        var peer = new Microsoft.UI.Xaml.Automation.Peers.ButtonAutomationPeer(btn);
+        var invokeProvider = (Microsoft.UI.Xaml.Automation.Provider.IInvokeProvider)
+            peer.GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Invoke);
+        invokeProvider.Invoke();
+    }
+
+    /// <summary>
+    /// "3 Button(s) present: "Save", "Cancel", "Reset"." — turns a crash line into a fix
+    /// without a debugger attach, the way <c>UiElementResolver.FindByName</c> does for E2E.
+    /// </summary>
+    private string DescribeContent<T>(string kind) where T : ContentControl
+    {
+        var all = FindAllControls<T>(_ => true);
+        if (all.Count == 0) return $"No {kind} is mounted at all.";
+
+        var labels = all
+            .Select(c => c.Content is string s ? $"\"{OneLine(s)}\"" : $"<{c.Content?.GetType().Name ?? "null"}>")
+            .Take(20)
+            .ToList();
+        var more = all.Count > labels.Count ? $", \u2026 (+{all.Count - labels.Count} more)" : "";
+        return $"{all.Count} {kind}(s) present: {string.Join(", ", labels)}{more}.";
+    }
+
+    /// <summary>
+    /// Escapes the characters that would break the single-line TAP record this text ends up
+    /// in. A throw from here surfaces as <c>not ok &lt;n&gt; &lt;fixture&gt;_CRASH - &lt;msg&gt;</c>
+    /// (SelfTestRunner.cs), and SelfTestBatch.ParseTap reads that stream line by line — so a
+    /// raw newline inside a control label would split one failure into two records and the
+    /// tail could be re-read as a forged <c>ok</c> / <c># Total failures:</c> line.
+    /// </summary>
+    private static string OneLine(string s)
+        => s.Replace("\r", "\\r", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal)
+            .Replace("\t", "\\t", StringComparison.Ordinal);
 
     // -- Tree walking ----------------------------------------------------
 

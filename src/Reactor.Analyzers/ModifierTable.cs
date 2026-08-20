@@ -269,7 +269,26 @@ internal sealed class AttachedModifierInfo
 /// </remarks>
 internal static class ModifierTable
 {
-    // Type groups, named once so the intent is legible at each use site.
+    // Type groups, named once so the intent is legible at each use site. Each name is its receiver
+    // list concatenated, which is deliberate — and it makes set inclusion equivalent to string
+    // inclusion. A gate that is a superset of another therefore *necessarily* has a name that
+    // contains the narrower one: ControlBorder is a prefix of ControlBorderGridStack, which is a
+    // prefix of ControlBorderGridStackRelative, which is a prefix of the ...Text form (8 such strict
+    // prefix pairs today), and PanelControlBorder contains ControlBorder without starting with it.
+    //
+    // So: compare what a gate CONTAINS, not what it is CALLED. Read ModifierInfo.ControlGate /
+    // ModifierInfo.PoolResetGate and compare the type sets — that is what every check in
+    // ModifierTableIntegrityTests does, and it is why none of them can be fooled here. It is also
+    // what ModifierGateProseParityTests does for the REACTOR_MOD_003 gate list in the shipped
+    // reactor-build-and-check skill: prose names receiver TYPES, so it compares sets too.
+    //
+    // Only when the artifact genuinely leaves no typed property reachable should you match this
+    // file as text, and then anchor on the delimiters the C# syntax guarantees: `SLOT:\s*NAME\s*[,)]`.
+    // A bare Contains(NAME) selects every wider gate as well, silently passing the very assertion
+    // meant to catch a mis-widened gate. tests/Reactor.Tests/AnalyzerTests/ModifierGateSource.cs is
+    // the test-only reference implementation of that matcher — it is internal to Reactor.Tests, so
+    // CLI and analyzer code must copy the pattern and add a parity test rather than call it —
+    // and ModifierGateIdentifierTests pins it to this table. Issue #1062.
     private static readonly string[] ControlBorderGridStackRelativeText = { "Control", "Border", "Grid", "StackPanel", "RelativePanel", "TextBlock" };
     private static readonly string[] ControlBorderGridStackRelative = { "Control", "Border", "Grid", "StackPanel", "RelativePanel" };
     private static readonly string[] ControlBorder = { "Control", "Border" };
@@ -699,10 +718,17 @@ internal static class ModifierTable
     /// mistake: <c>Grid.Padding</c> and <c>Grid.CornerRadius</c> sat here after the #1003 union
     /// with reasons that said, in as many words, "instance dependency property on Grid, not an
     /// attached property" — which is a misclassification to fix at the source, not to record.
-    /// They are now declared instance properties via <c>InstancePropertyOwners</c>, so the scan
-    /// never claims them and nothing needs excluding. Suppressing that kind of entry here is
-    /// actively harmful, because a genuinely attached <c>Grid.*</c> reset added later would land
-    /// in the same bucket and read as already-triaged.
+    /// The test's scan — not this analyzer — now classifies per <em>property</em> rather than per
+    /// owner (#1067): <c>PoolResetSetConsistencyTests</c> asks whether the owner declares the
+    /// static <c>Owner.SetPROP(DependencyObject, value)</c> this rule matches, so
+    /// <c>Grid.Padding</c> is instance while <c>Grid.Row</c> is attached, and neither needs an
+    /// entry here. Suppressing that kind of entry would be actively harmful, because a genuinely
+    /// attached <c>Grid.*</c> reset added later would land in the same bucket and read as
+    /// already-triaged. That is now mechanically enforced rather than merely described:
+    /// <c>PoolResetSetConsistencyTests.Excluded_Attached_Rows_Never_Name_An_Instance_Owner</c>
+    /// rejects any key here whose owner the classification list already covers, so re-adding one of
+    /// those rows — by hand or by a merge that reconciles this list against an older revision's —
+    /// fails the build instead of silently reverting the fix (#1066).
     /// </remarks>
     public static readonly IReadOnlyDictionary<string, string> DeliberatelyExcludedAttached =
         new Dictionary<string, string>(System.StringComparer.Ordinal)
