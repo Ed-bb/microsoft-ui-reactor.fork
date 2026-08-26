@@ -96,6 +96,7 @@ class ScaleDemo : Component
             ).Padding(12)
              .CornerRadius(8)
              .Background("#e8e8e8")
+             .Scale(enlarged ? 1.5f : 1.0f)
              .ScaleTransition()
         ).Padding(24);
     }
@@ -104,9 +105,10 @@ class ScaleDemo : Component
 
 ![Scale transition](images/animation/scale-transition.png)
 
-Scale uses the element's center as the transform origin. A value of `1.0f` is
-normal size, `1.5f` is 150%. You can pass a custom `Vector3Transition` to
-control which axes animate.
+A value of `1.0f` is normal size, `1.5f` is 150%. Scale grows from the
+element's top-left corner by default — set `.CenterPoint()` to scale around a
+different origin. You can pass a custom `Vector3Transition` to control which
+axes animate.
 
 ## Translation Transition
 
@@ -196,8 +198,10 @@ class CombinedDemo : Component
              .CornerRadius(8)
              .Background("#7b2ab5")
              .Opacity(active ? 1.0 : 0.4)
+             .Scale(active ? 1.2f : 1.0f)
              .Translation(active ? 40f : 0f, 0f, 0f)
              .OpacityTransition(TimeSpan.FromMilliseconds(400))
+             .ScaleTransition()
              .TranslationTransition()
         ).Padding(24);
     }
@@ -228,16 +232,20 @@ class LayoutAnimationDemo : Component
         return VStack(12,
             SubHeading("Layout Animation"),
             HStack(8,
-                Button("Add Item", () => {
+                Button("Add Item", () =>
+                {
                     nextId.Current++;
-                    updateItems(l => [.. l, $"Item {nextId.Current}"]);
+                    updateItems(l => [$"Item {nextId.Current}", .. l]);
                 }),
-                Button("Remove Last", () => updateItems(l =>
-                    l.Count > 0 ? l.Take(l.Count - 1).ToList() : l))
+                Button("Remove First", () =>
+                    updateItems(l => l.Count > 0 ? l[1..] : l))
             ),
             VStack(4, items.Select(item =>
-                TextBlock(item).Padding(horizontal: 8, vertical: 12).Background("#f0f0f0")
-                    .CornerRadius(4).LayoutAnimation()
+                TextBlock(item)
+                    .Padding(horizontal: 8, vertical: 12)
+                    .Background("#f0f0f0")
+                    .CornerRadius(4)
+                    .LayoutAnimation()
                     .WithKey($"item-{item}")
             ).ToArray())
         ).Padding(24);
@@ -294,6 +302,23 @@ class ConnectedAnimationDemo : Component
 
 Both the source and destination elements must use the same key string. The
 animation runs automatically when the reconciler detects the transition.
+Source and destination must appear in the **same render** — the reconciler
+publishes the outgoing element's snapshot during the reconcile pass and plays
+it into the incoming element at the end of that same pass.
+
+Reactor snapshots *every* outgoing element that carries a key, because it cannot
+know which sibling you activated. Collapsing a list of keyed rows to one detail
+element therefore leaves the unpicked rows' snapshots behind, and WinUI keeps
+each of those painted at its old position for about a second before expiring it.
+Keep the keyed set small — key the rows you actually navigate between — if that
+overlap is distracting.
+
+Connected animation does not compose with an exit `.Transition(...)` on the
+**same** element: the exit transition defers the element's teardown, and with it
+the snapshot, past the point where the destination looks for it, so the
+animation silently does not play. Put the key and the exit transition on
+different elements.
+
 Use connected animations for list-to-detail [navigation](navigation.md)
 where an element "flies" from the list into the detail view.
 
