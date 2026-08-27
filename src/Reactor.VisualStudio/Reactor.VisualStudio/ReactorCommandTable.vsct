@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <Extern href="stdidcmd.h"/>
+  <Extern href="vsshlids.h"/>
+
+  <Commands package="guidReactorInProcPackage">
+    <Groups>
+      <Group guid="guidReactorCmdSet" id="MyMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_ITEMNODE"/>
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidReactorCmdSet" id="cmdidShowPreview" priority="0x0100" type="Button">
+        <Parent guid="guidReactorCmdSet" id="MyMenuGroup" />
+        <Strings>
+          <ButtonText>Reactor: Show Preview...</ButtonText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidReactorCmdSet" id="cmdidShowComponents" priority="0x0101" type="Button">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
+        <Strings>
+          <ButtonText>Reactor Components</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <Symbols>
+    <!-- This is the package GUID. -->
+    <GuidSymbol name="guidReactorInProcPackage" value="{e87f1190-2c77-4c8d-8fb8-2231ab46618e}" />
+
+    <!-- This is the GUID used to group the menu commands together -->
+    <GuidSymbol name="guidReactorCmdSet" value="{e87f1190-2c77-4c8d-8fb8-2231ab46618e}">
+      <IDSymbol name="MyMenuGroup" value="0x1020" />
+      <IDSymbol name="cmdidShowPreview" value="0x0100" />
+      <IDSymbol name="cmdidShowComponents" value="0x0101" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
