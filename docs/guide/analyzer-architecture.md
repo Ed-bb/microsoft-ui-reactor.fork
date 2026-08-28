@@ -22,8 +22,9 @@ rule. The user-facing catalog of diagnostics lives on the
 [Rules of Reactor](rules-of-reactor.md) page; this is the contributor
 view. The analyzers sit in
 [`src/Reactor.Analyzers/`](https://github.com/microsoft/reactor) and
-are pulled into every Reactor consumer through the SDK's
-`Analyzers` ItemGroup.
+reach every Reactor consumer because `Reactor.Analyzers.dll` is packed
+into the `Microsoft.UI.Reactor` NuGet package under
+`analyzers/dotnet/cs`, which the SDK loads automatically.
 
 ## The rule pipeline
 
@@ -133,7 +134,9 @@ shape every analyzer that needs to look at trailing modifiers uses.
 These are the rules shipping out of
 [`src/Reactor.Analyzers/`](https://github.com/microsoft/reactor) today.
 Severity is the default; consumers can promote or suppress per project
-via `.editorconfig`.
+via `.editorconfig`. One entry — `REACTOR_DOC_001` — ships from the
+sibling `src/Reactor.Analyzers.Internal/` project instead; see
+[The doc-system analyzer](#the-doc-system-analyzer) for why.
 
 | Id | Severity | Title | Source |
 |---|---|---|---|
@@ -253,20 +256,63 @@ private static void AnalyzeInvocation(SyntaxNodeAnalysisContext context)
     if (args.Count == 0)
         return;
 
-    // Check if the first argument is a string literal
-    var firstArg = args[0].Expression;
-    if (firstArg is not LiteralExpressionSyntax literal)
-        return;
-    if (!literal.IsKind(SyntaxKind.StringLiteralExpression))
-        return;
+    // Every string literal the first argument can evaluate to -- not just the argument itself.
+    // Gating on `firstArg is LiteralExpressionSyntax` let a selected/unselected pair like
+    // `.Background(isSelected ? "#E5F1FB" : "#FFFFFF")` through completely unreported, which is
+    // still two hard-coded colours and still ignores the reader's theme.
+    foreach (var literal in ColorLiterals(args[0].Expression))
+        ReportHardCodedColor(context, literal, methodName);
+}
 
-    var colorValue = literal.Token.ValueText;
+/// <summary>
+/// The string literals an argument can evaluate to.
+/// </summary>
+/// <remarks>
+/// Only value-<em>selecting</em> shapes are walked — a parenthesis, conditional, null-coalesce,
+/// or switch expression. Walking every descendant instead would reach into nested calls and
+/// report things that are not colours at all, e.g. the argument of
+/// <c>.Background(LookUpBrush("accent-ish"))</c>.
+/// </remarks>
+private static IEnumerable<LiteralExpressionSyntax> ColorLiterals(ExpressionSyntax? expression)
+{
+    switch (expression)
+    {
+        case LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.StringLiteralExpression):
+            yield return literal;
+            break;
+
+        case ParenthesizedExpressionSyntax parenthesized:
+            foreach (var nested in ColorLiterals(parenthesized.Expression)) yield return nested;
+            break;
+
+        case ConditionalExpressionSyntax conditional:
+            foreach (var nested in ColorLiterals(conditional.WhenTrue)) yield return nested;
+            foreach (var nested in ColorLiterals(conditional.WhenFalse)) yield return nested;
+            break;
+
+        case BinaryExpressionSyntax coalesce when coalesce.IsKind(SyntaxKind.CoalesceExpression):
+            foreach (var nested in ColorLiterals(coalesce.Left)) yield return nested;
+            foreach (var nested in ColorLiterals(coalesce.Right)) yield return nested;
+            break;
+
+        case SwitchExpressionSyntax switchExpression:
+            foreach (var arm in switchExpression.Arms)
+                foreach (var nested in ColorLiterals(arm.Expression)) yield return nested;
+            break;
+    }
+}
 ```
 
 [`REACTOR_THEME_001`](theming-tokens.md) is a counterpoint: the rule
-needs to read the string literal that follows
-`.Background("...")` / `.Foreground("...")` / `.WithBorder("...")` and
-map it to a suggested theme token. The descriptor message format has a
+needs to read the string literals an argument to
+`.Background("...")` / `.Foreground("...")` / `.WithBorder("...")` can
+evaluate to, and map each one to a suggested theme token. It walks the
+value-*selecting* shapes — a conditional, switch, null-coalesce, or
+parenthesis — rather than only accepting a bare literal, because
+`.Background(isSelected ? "#E5F1FB" : "#FFFFFF")` is still two
+hard-coded colours. It deliberately does not walk into nested calls,
+where a string is not necessarily a colour at all. The descriptor
+message format has a
 `{0}` slot for the suggested token, which the analyzer looks up in
 `ColorToThemeToken` after the syntactic match. The diagnostic flows
 through to a paired `CodeFixProvider` that rewrites the literal to the
@@ -391,24 +437,41 @@ set, because part of the decision is semantic — whether
 `SetToolTip`'s `object` argument really is a `string` — and the
 analyzer is the side that already holds a `SemanticModel`.
 
-## The doc-system analyzers
+## The doc-system analyzer
 
 Phase 1.8 of [spec 041](https://github.com/microsoft/reactor) added
 an analyzer that doesn't fire on application code at all — it fires
 on the Reactor SDK's own source to keep the auto-generated reference
 docset honest. `REACTOR_DOC_001` flags any public type, method,
-property, or event without a `<summary>` XML doc comment. It runs
-during the `dotnet build` of `Reactor.csproj` itself; downstream
-consumers don't see it. Unresolved `cref="X"` attributes are caught by
-the built-in `CS1574` (configured in `src/Reactor/.editorconfig`); a
+property, field, or event without a `<summary>` XML doc comment.
+
+It lives in its own project, `src/Reactor.Analyzers.Internal/`, and that
+separation is the point. `Reactor.csproj` references
+`Reactor.Analyzers.Internal` with `OutputItemType="Analyzer"` so the rule
+runs while the framework itself compiles, and deliberately does *not*
+pack that DLL into the nupkg — the rule has no purpose on consumer code
+and used to leak there when it was bundled into `Reactor.Analyzers.dll`.
+The mirror-image arrangement applies to the customer-facing bundle:
+`Reactor.csproj` references `Reactor.Analyzers` with
+`ReferenceOutputAssembly="false"` purely so its build output can be
+packed to `analyzers/dotnet/cs`, and does *not* register it as an
+analyzer over framework internals, where consumer-code rules would fire
+spuriously. Today `Reactor.csproj` also carries
+`REACTOR_DOC_001` in `NoWarn` alongside `CS1591`, so the framework build
+does not currently gate on missing summaries; the wiring stays in place
+so any project that wants stricter enforcement can re-enable the rule.
+Unresolved `cref="X"` attributes are caught by
+the built-in `CS1574` (severity configured in `src/Reactor/.editorconfig`); a
 former `REACTOR_DOC_002` analyzer mirrored that same check under a
 Reactor-specific id but added no analysis on top, so it was removed.
 
 The doc analyzer registers a `SymbolAction` instead of a
 `SyntaxNodeAction` — the question it answers is per-symbol
 (is this symbol documented?) rather than per-syntax-node, so the
-symbol-level callback is the cheaper and more accurate hook. This is
-the second registration pattern in the codebase; everything else uses
+symbol-level callback is the cheaper and more accurate hook. It is not
+alone: `ComponentInpcAnalyzer` (`REACTOR_STATE_001`) and
+`StaticNavigationHandleAnalyzer` (`REACTOR_NAV_001`) register symbol
+actions too, for the same reason. Everything else uses
 the syntax-node pattern from the rule pipeline above. When you author a
 new analyzer, the question to ask first is "is this rule about a
 location in source, or about a thing in the type system" — the answer
@@ -419,20 +482,32 @@ picks the registration kind.
 ### Authoring a new analyzer
 
 The minimum new-analyzer surface is one descriptor, one registration,
-one rule body, and one entry in the project's `AnalyzerReleases.Shipped.md`
-when the rule moves out of preview. Start by writing the descriptor
-with a stable id that follows the `REACTOR_<CATEGORY>_<NNN>` convention:
+one rule body, and — this one is not optional — one row in the
+project's `AnalyzerReleases.Unshipped.md`. Roslyn's own `RS2008`
+analyzer fails the build for any id with no release-tracking row, so
+skipping it is a compile error, not a style nit; the row migrates to
+`AnalyzerReleases.Shipped.md` when the rule ships. Start by writing the
+descriptor with a stable id that follows the
+`REACTOR_<CATEGORY>_<NNN>` convention:
 
 ```csharp
-public const string DiagnosticId = "REACTOR_MYTHING_001";
+public const string DiagnosticId = "REACTOR_DYM_005";
+
+private static readonly LocalizableString Title =
+    "Reactor factory expects an Element, not a string";
+private static readonly LocalizableString MessageFormat =
+    "'{0}' expects an Element here but a string was supplied — wrap it in a text factory such as TextBlock, Heading or Caption";
+private static readonly LocalizableString Description =
+    "A string was passed where a Reactor Element is required (compiler CS1503). Wrap it in a text factory such as TextBlock(\"…\").";
+
 private static readonly DiagnosticDescriptor Rule = new(
     DiagnosticId,
-    title: "One-line title",
-    messageFormat: "Specific problem: {0}",
-    category: "Reactor.MyThing",
-    defaultSeverity: DiagnosticSeverity.Warning,
+    Title,
+    MessageFormat,
+    "Reactor.DidYouMean",
+    DiagnosticSeverity.Warning,
     isEnabledByDefault: true,
-    description: "Why this is wrong and what to do instead.");
+    description: Description);
 ```
 
 Then register the syntax-node action in `Initialize` and write the
@@ -442,9 +517,22 @@ first, name fast-path second, symbol resolution last, diagnostic
 report only after all of those. If the rule wants a code fix, route
 the relevant capture into `Diagnostic.Properties` and pair the
 analyzer with a `CodeFixProvider` in the same assembly. Add a unit
-test under `tests/Reactor.Analyzers.Tests/` for the positive case,
+test under `tests/Reactor.Tests/AnalyzerTests/` for the positive case,
 the negative case, and any edge that almost trips the syntactic
 fast path — those are the regressions that bite later.
+(`tests/Reactor.Compile.Analyzer.Tests/` is the companion project that
+proves a rule actually fires through a real `dotnet build`.)
+
+> **Caveat:** `src/Reactor.Analyzers` targets **`netstandard2.0`**, because that is
+> the only TFM a Roslyn analyzer can load from in every supported host
+> (VS, `dotnet build`, OmniSharp). Nothing from net8+ is available:
+> no `FrozenDictionary`, no `System.Text.Json` source-gen, no collection
+> expressions over `ImmutableArray` builders you'd get for free in the
+> main library. It also **cannot reference `src/Reactor.Cli`** — the
+> analyzer assembly must stand alone inside the compiler process. When a
+> rule needs logic the CLI already has (the `mur check` mirror of the same
+> diagnostic is the usual case), copy it and add a parity test rather than
+> introducing the reference.
 
 ## Common Mistakes
 

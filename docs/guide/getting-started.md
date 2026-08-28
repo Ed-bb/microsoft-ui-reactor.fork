@@ -304,7 +304,9 @@ class GettingStartedApp : Component
 
         return VStack(16,
             TextBlock($"Hello, {name}!").FontSize(24).Bold(),
-            TextBox(name, setName, placeholderText: "Enter your name").Width(250)
+            TextBox(name, setName, placeholderText: "Enter your name")
+                .AutomationName("Name")
+                .Width(250)
         ).Padding(24);
     }
 }
@@ -325,7 +327,7 @@ Here's what's happening:
 - **[`UseState`](hooks.md)** returns the current value and a setter. When you call the
   setter, Reactor re-renders the component with the new value.
 - **[`VStack`](layout.md)** stacks children vertically. The number `16` is the pixel spacing.
-- **`Text(...).FontSize(24).Bold()`** is the fluent modifier pattern — every
+- **`TextBlock(...).FontSize(24).Bold()`** is the fluent modifier pattern — every
   element supports chainable modifiers for styling and layout.
 
 Type in the text box and the greeting updates instantly. There's no event
@@ -390,8 +392,12 @@ class MultipleStateExample : Component
 
         return VStack(12,
             TextBlock($"Hello, {fullName}!").FontSize(fontSize).Bold(),
-            TextBox(firstName, setFirstName, placeholderText: "First name").Width(200),
-            TextBox(lastName, setLastName, placeholderText: "Last name").Width(200),
+            TextBox(firstName, setFirstName, placeholderText: "First name")
+                .AutomationName("First name")
+                .Width(200),
+            TextBox(lastName, setLastName, placeholderText: "Last name")
+                .AutomationName("Last name")
+                .Width(200),
             HStack(8,
                 TextBlock("Font size:"),
                 Slider(fontSize, 10, 40, setFontSize).Width(200),
@@ -467,7 +473,7 @@ of items, a way to add new ones, and checkboxes to mark them done.
 First, define a simple record for items:
 
 ```csharp
-record TodoItem(string Text, bool Done);
+record TodoItem(string Id, string Text, bool Done);
 ```
 
 Now the full component:
@@ -484,13 +490,15 @@ class TodoApp : Component
 {
     public override Element Render()
     {
-        var (items, updateItems) = UseReducer(new List<TodoItem>
+        var initialItems = UseMemo(() => new List<TodoItem>
         {
-            new("Learn Reactor basics", true),
-            new("Build a todo app", false),
-            new("Explore hooks", false),
+            new("todo-1", "Learn Reactor basics", true),
+            new("todo-2", "Build a todo app", false),
+            new("todo-3", "Explore hooks", false),
         });
+        var (items, updateItems) = UseReducer(initialItems);
         var (newText, setNewText) = UseState("");
+        var (nextId, setNextId) = UseState(4);
 
         var doneCount = items.Count(i => i.Done);
 
@@ -501,12 +509,15 @@ class TodoApp : Component
             // Input row
             HStack(8,
                 TextBox(newText, setNewText, placeholderText: "What needs to be done?")
+                    .AutomationName("New todo")
                     .Width(300),
                 Button("Add", () =>
                 {
                     if (!string.IsNullOrWhiteSpace(newText))
                     {
-                        updateItems(list => [.. list, new TodoItem(newText.Trim(), false)]);
+                        var text = newText.Trim();
+                        updateItems(list => [.. list, new TodoItem($"todo-{nextId}", text, false)]);
+                        setNextId(nextId + 1);
                         setNewText("");
                     }
                 }).IsEnabled(!(string.IsNullOrWhiteSpace(newText)))
@@ -514,13 +525,15 @@ class TodoApp : Component
 
             // Item list
             VStack(4,
-                items.Select((item, index) =>
+                items.Select((item, _) =>
                     HStack(8,
                         CheckBox(item.Done, done =>
                             updateItems(list =>
                             {
                                 var copy = new List<TodoItem>(list);
-                                copy[index] = item with { Done = done };
+                                var itemIndex = copy.FindIndex(i => i.Id == item.Id);
+                                if (itemIndex >= 0)
+                                    copy[itemIndex] = item with { Done = done };
                                 return copy;
                             }),
                             label: item.Text
@@ -529,11 +542,11 @@ class TodoApp : Component
                             updateItems(list =>
                             {
                                 var copy = new List<TodoItem>(list);
-                                copy.RemoveAt(index);
+                                copy.RemoveAll(i => i.Id == item.Id);
                                 return copy;
                             })
-                        )
-                    ).WithKey($"todo-{index}")
+                        ).AutomationName($"Remove {item.Text}")
+                    ).WithKey(item.Id)
                 ).ToArray()
             ),
 
@@ -541,7 +554,7 @@ class TodoApp : Component
             When(doneCount > 0, () =>
                 Button($"Clear completed ({doneCount})", () =>
                     updateItems(list => list.Where(i => !i.Done).ToList())
-                )
+                ).AutomationName("Clear completed todos")
             )
         ).Padding(24);
     }
@@ -637,10 +650,19 @@ class CalculatorApp : Component
 
         Element NumButton(string digit) =>
             Button(digit, () => PressDigit(digit))
+                .AutomationName($"Digit {digit}")
                 .Width(60).Height(48);
 
         Element OpButton(string label, string opCode) =>
             Button(label, () => PressOp(opCode))
+                .AutomationName(opCode switch
+                {
+                    "+" => "Add",
+                    "-" => "Subtract",
+                    "*" => "Multiply",
+                    "/" => "Divide",
+                    _ => $"Operator {label}"
+                })
                 .Width(60).Height(48);
 
         return VStack(4,
@@ -659,7 +681,9 @@ class CalculatorApp : Component
                        NumButton("1"), NumButton("2"), NumButton("3")),
             HStack(4, OpButton("-", "-"),
                        NumButton("0"), OpButton("+", "+"),
-                       Button("=", PressEquals).Width(60).Height(48))
+                       Button("=", PressEquals)
+                          .AutomationName("Equals")
+                          .Width(60).Height(48))
         ).Padding(16);
     }
 
@@ -702,18 +726,34 @@ Every Reactor app eventually has the same two ingredients: an event
 handler that calls a setter, and a value rendered from the setter's
 state slot. The hello-world snippet above wires `setName` to
 `TextBox`'s change handler and reads `name` back in the
-`Text("Hello, ...")` line — that round trip is the entire reactivity
+`TextBlock("Hello, ...")` line — that round trip is the entire reactivity
 contract. Once it feels routine, every other [hook](hooks.md) is just
 a specialization (`UseReducer` for derived updates, `UseEffect` for
 side effects, `UseRef` for non-rendering bookkeeping).
 
 ### Running with devtools
 
-Launch with `dotnet run -c Debug` and Reactor mounts the in-app dev
-menu (Ctrl+Shift+D by default). The reconcile-highlight overlay flashes
-on every commit, and the [dev tooling](dev-tooling.md) page covers the
-full menu. The overlay is no-cost in Release builds — the dev menu
-compiles out under `#if DEBUG`.
+The dev menu needs **two** independent signals, and neither one is
+`#if DEBUG`. First the build-time capability — the `Reactor.DevtoolsSupport`
+feature switch, which `dotnet new reactorapp` already sets in Debug
+configurations along with the `Microsoft.UI.Reactor.Devtools` package. Second a
+session opt-in on the command line:
+
+```powershell
+dotnet run -- --devtools app
+```
+
+The scaffolded `Properties/launchSettings.json` ships a second
+`"<AppName> Devtools"` profile that passes that flag for you, so pick that
+profile in Visual Studio or use
+`dotnet run --launch-profile "<AppName> Devtools"`. The default profile
+deliberately passes no arguments — a plain `dotnet run -c Debug` starts the app
+with **no** dev menu.
+
+`UseDevtools()` returns `true` only when both signals are present, which is what
+gates the reconcile-highlight overlay and the rest of the menu. Release builds
+drop the package and the switch, so the devtools code trims away entirely. The
+[dev tooling](dev-tooling.md) page covers the full menu.
 
 ## Common Mistakes
 
@@ -765,7 +805,7 @@ one thing, then compose them in parent components. You'll rarely need more than
 `Component` or `Component<TProps>` as a base class.
 
 **Fluent modifiers are your friend.** Instead of wrapping elements in layout
-containers for simple styling, chain modifiers: `Text("hi").Margin(8).Bold()`
+containers for simple styling, chain modifiers: `TextBlock("hi").Margin(8).Bold()`
 reads cleanly and avoids unnecessary nesting.
 
 ## Next Steps
