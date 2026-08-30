@@ -16,6 +16,7 @@ class Greeting : Component
         return VStack(12,
             TextBlock($"Hello, {name}!").FontSize(20).Bold(),
             TextBox(name, setName, placeholderText: "Your name")
+                .AutomationName("Name")
                 .Width(200)
         ).Padding(16);
     }
@@ -33,9 +34,9 @@ class Alert : Component<AlertProps>
     {
         var bg = Props.Severity switch
         {
-            "error" => "#FDE7E9",
-            "warning" => "#FFF4CE",
-            _ => "#DFF6DD"
+            "error" => Theme.SystemCriticalBackground,
+            "warning" => Theme.SystemCautionBackground,
+            _ => Theme.SystemSuccessBackground
         };
 
         return Border(
@@ -93,6 +94,21 @@ class FunctionComponentDemo : Component
     }
 }
 // </snippet:function-component>
+
+static class FunctionRootSnippet
+{
+    public static void Run()
+    {
+        // <snippet:function-root>
+        ReactorApp.Run("Title", ctx =>
+        {
+            var (n, setN) = ctx.UseState(0);
+            return Button($"Count: {n}", () => setN(n + 1))
+                .AutomationName("Increment count");
+        }, width: 400, height: 300);
+        // </snippet:function-root>
+    }
+}
 
 // <snippet:factory-helpers>
 static class Components

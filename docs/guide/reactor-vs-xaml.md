@@ -35,7 +35,7 @@ complements.
 | State location | View-model property / dependency property | Hook slot inside `RenderContext` |
 | State signal | `INotifyPropertyChanged.PropertyChanged` | Setter closure from `UseState` |
 | Property write | `BindingExpression.UpdateTarget` pulls VM getter | Reconciler writes after render |
-| Style application | `Style` + `Setter` + triggers | Modifier chain or `Use*` named-style hook |
+| Style application | `Style` + `Setter` + triggers | Element/modifier composition or `Use*` named-style hook |
 | Animation | `Storyboard` defined in XAML, started imperatively | `.Animate(...)` / `.Transition(...)` modifier resolved by reconciler |
 | Layout state | `VisualStateManager` + `VisualState`/Group XAML | `.InteractionStates(...)` modifier on element |
 | Resources | `ResourceDictionary` / `ThemeDictionary` | [`ThemeRef`](theming-tokens.md) record struct |
@@ -224,20 +224,21 @@ that matches a `TargetType` (or carries the style key). The bag is
 keyed by DP, and `BasedOn` chains styles through inheritance.
 
 Reactor has two analogues. The most common is a plain method that
-takes an element and applies modifiers:
+composes elements and modifiers:
 
 ```csharp
 // A XAML `Style` is a keyed bag of setters matched by TargetType. The
-// Reactor analogue is a plain method that applies modifiers — no static
-// registration, no runtime TargetType check, just composition.
+// Reactor analogue is a plain method that composes a wrapper element — no
+// static registration, no runtime TargetType check, just composition.
 static Element CardSurface(Element child) =>
-    child.Background(Theme.CardBackground)
-         .CornerRadius(8)
-         .Padding(16);
+    Border(child)
+        .Background(Theme.CardBackground)
+        .CornerRadius(8)
+        .Padding(16);
 ```
 
-Calling `CardSurface(TextBlock("hi"))` returns the modified element. This
-is just composition — no framework involvement, no static
+Calling `CardSurface(TextBlock("hi"))` returns a `Border` around the child
+with the card modifiers applied. This is just composition — no framework involvement, no static
 registration, no `Style.TargetType` check at runtime.
 
 For the handful of canonical WinUI named styles, the [styling](styling.md)

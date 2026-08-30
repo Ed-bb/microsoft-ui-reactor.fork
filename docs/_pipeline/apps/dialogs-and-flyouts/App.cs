@@ -79,8 +79,7 @@ class DialogGatedPrimaryDemo : Component
             ContentDialog(
                 "Rename file",
                 VStack(8,
-                    TextBlock("New filename:"),
-                    TextBox(name, setName, placeholderText: "untitled.txt")
+                    TextBox(name, setName, placeholderText: "untitled.txt", header: "New filename")
                         .Width(280)),
                 primaryButtonText: "Rename") with
             {
@@ -166,12 +165,13 @@ class PopupDemo : Component
                 TextBlock("This is a Popup.").Bold(),
                 TextBlock("Click outside to dismiss.")
             ).Padding(12)
-        ).Background("#FFFFFF").WithBorder("#888888").CornerRadius(6);
+        ).Background(Theme.SolidBackground).WithBorder(Theme.ControlStroke).CornerRadius(6);
 
         return VStack(8,
             SubHeading("Popup"),
             Button(open ? "Hide popup" : "Show popup",
-                () => setOpen(!open)),
+                () => setOpen(!open))
+                .AutomationName(open ? "Hide popup" : "Show popup"),
             Popup(popupContent, isOpen: open,
                 onClosed: () => setOpen(false))
                 .IsLightDismissEnabled()
@@ -265,7 +265,8 @@ class ModalPopupDemo : Component
                         TextBlock("Focus stays inside this popup."),
                         Button("Close", () => setOpen(false))
                     ).Padding(16)
-                ).FocusTrap(trap),
+                ).FocusTrap(trap)
+                 .Semantics(role: "dialog"),
                 isOpen: open,
                 onClosed: () => setOpen(false))
         ).Padding(24);
@@ -320,6 +321,53 @@ class DialogAsyncCommandDemo : Component
 }
 // </snippet:dialog-async-command>
 
+record ContextMenuRow(int Id, string Name);
+
+class RowContextMenuDemo : Component
+{
+    private static readonly ContextMenuRow[] Items =
+    [
+        new(1, "Quarterly plan"),
+        new(2, "Launch checklist"),
+        new(3, "Budget review")
+    ];
+
+    public override Element Render()
+    {
+        var items = Items;
+        var deleteCommand = new Command<ContextMenuRow>
+        {
+            Label = "Delete",
+            Execute = _ => { },
+        };
+        var renameCommand = new Command<ContextMenuRow>
+        {
+            Label = "Rename",
+            Execute = _ => { },
+        };
+        var propertiesCommand = new Command<ContextMenuRow>
+        {
+            Label = "Properties",
+            Execute = _ => { },
+        };
+
+        Element RowContent(ContextMenuRow item) =>
+            HStack(8, TextBlock(item.Name));
+
+        return
+            // <snippet:right-click-list-row>
+            ListView(items, item => item.Id.ToString(), (item, _) =>
+                MenuFlyout(
+                    RowContent(item),
+                    MenuItem(deleteCommand, item),
+                    MenuItem(renameCommand, item),
+                    MenuSeparator(),
+                    MenuItem(propertiesCommand, item)))
+            // </snippet:right-click-list-row>
+            ;
+    }
+}
+
 class DialogsAndFlyoutsApp : Component
 {
     public override Element Render() => ScrollView(
@@ -334,7 +382,8 @@ class DialogsAndFlyoutsApp : Component
             Component<CommandingIntegrationDemo>(),
             Component<TeachingTipTargetDemo>(),
             Component<ModalPopupDemo>(),
-            Component<DialogAsyncCommandDemo>()
+            Component<DialogAsyncCommandDemo>(),
+            Component<RowContextMenuDemo>()
         ).Padding(24)
     );
 }

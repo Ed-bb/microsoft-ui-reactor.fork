@@ -5,8 +5,10 @@ using Microsoft.UI.Reactor.Data.Providers;
 using Microsoft.UI.Reactor.Controls;
 using Microsoft.UI.Xaml;
 using System.Collections.ObjectModel;
+// <snippet:imports>
 using static Microsoft.UI.Reactor.Factories;
 using static Microsoft.UI.Reactor.Advanced.Factories;
+// </snippet:imports>
 
 ReactorApp.Run<DataSystemApp>("Data System", width: 900, height: 600
 );
@@ -104,8 +106,8 @@ class SelectionDemo : Component
 {
     public override Element Render()
     {
-        var (selected, setSelected) = UseState<IReadOnlySet<RowKey>>(
-            new HashSet<RowKey>());
+        var initialSelection = UseMemo<IReadOnlySet<RowKey>>(() => new HashSet<RowKey>());
+        var (selected, setSelected) = UseState(initialSelection);
 
         var source = UseMemo(() => new ListDataSource<Product>(
             SampleProducts.Items, p => (RowKey)p.Id));
@@ -213,7 +215,7 @@ class RowDetailsDemo : Component
                     TextBlock($"Full details for {product.Name}"),
                     TextBlock($"Category: {product.Category}"),
                     TextBlock($"Unit price: {product.Price:C2}, Stock: {product.Stock}")
-                ).Padding(16).Background("#f5f5f5")
+                ).Padding(16).Background(Theme.CardBackground)
         ).Height(400);
     }
 }

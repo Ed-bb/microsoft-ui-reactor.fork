@@ -81,6 +81,13 @@ public UIElement? Reconcile(
         DebugElementsSkipped = 0;
         DebugUIElementsCreated = 0;
         DebugUIElementsModified = 0;
+        // Drop destination references a previous pass queued but never flushed. Every
+        // shipped host flushes at the end of each render, but a pass that threw
+        // mid-reconcile — or a Reconcile() caller that never flushes (tests,
+        // embedders) — must not accumulate strong UIElement refs. A list clear, so
+        // nothing here can throw and strand the depth counter incremented just above.
+        _pendingConnectedAnimationStarts.Clear();
+        _preparedConnectedAnimationKeys.Clear();
         if (ReactorFeatureFlags.HighlightReconcileChanges)
         {
             (_highlightMounted ??= new()).Clear();
@@ -289,7 +296,7 @@ position are treated as different elements (force unmount + mount).
 Without a key, identity follows position.
 
 ```csharp
-ForEach(items, item => Card(item).WithKey(item.Id))
+ForEach(items, item => Card(item).WithKey(item.Id));
 ```
 
 Use keys when:
@@ -341,9 +348,16 @@ private static readonly global::Microsoft.UI.Xaml.RoutedEventHandler __ClickTram
 };
 ```
 
+The descriptor adapter refreshes that live tag on both mount and update:
+
 ```csharp
-// Mount / Update: refresh the tag, but only when something will read it
-Reconciler.SetElementTagIfNeeded(control, newElement);
+if (control is FrameworkElement fe)
+    Reconciler.SetElementTagIfNeeded(fe, typedEl);
+```
+
+```csharp
+if (control is FrameworkElement fe)
+    Reconciler.SetElementTagIfNeeded(fe, typedNew);
 ```
 
 Tagging is allocation-gated. `NeedsTag(element)` is true when the
@@ -384,8 +398,10 @@ typical mistake is to derive the key from a value that can change:
 
 ```csharp
 // Stable: row identity persists across edits
-ForEach(rows, row => Card(row).WithKey(row.Id))
+ForEach(rows, row => Card(row).WithKey(row.Id));
+```
 
+```csharp
 // Unstable: changing the title changes the key, remounts the card,
 // loses any state attached via UseState inside Card
 ForEach(rows, row => Card(row).WithKey(row.Title))

@@ -84,14 +84,14 @@ class SwatchGrid : Component
     private static Element SwatchSection(string title, (string Name, ThemeRef Ref)[] tokens) =>
         VStack(8,
             SubHeading(title),
-            VStack(4, tokens.Select(t => Row(t.Name, t.Ref)).ToArray())
+            VStack(4, tokens.Select(t => Row(t.Name, t.Ref).WithKey(t.Name)).ToArray())
         );
 
     private static Element Row(string name, ThemeRef token) => HStack(12,
         new BorderElement(Empty())
             .Background(token)
             .Size(40, 24)
-            .WithBorder("#DDDDDD"),
+            .WithBorder(Theme.ControlStroke),
         TextBlock(name).Width(220),
         TextBlock(token.ResourceKey).Opacity(0.6)
     );
@@ -327,7 +327,7 @@ A single sub-tree can opt out of the app theme via
 a print-preview pane that should always look light:
 
 ```csharp
-ScrollView(content).RequestedTheme(ElementTheme.Light);
+return ScrollView(content).RequestedTheme(ElementTheme.Light);
 ```
 
 The walk in `Theme.Resolve` picks up the local override first, so

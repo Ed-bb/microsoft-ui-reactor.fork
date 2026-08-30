@@ -75,14 +75,14 @@ class SwatchGrid : Component
     private static Element SwatchSection(string title, (string Name, ThemeRef Ref)[] tokens) =>
         VStack(8,
             SubHeading(title),
-            VStack(4, tokens.Select(t => Row(t.Name, t.Ref)).ToArray())
+            VStack(4, tokens.Select(t => Row(t.Name, t.Ref).WithKey(t.Name)).ToArray())
         );
 
     private static Element Row(string name, ThemeRef token) => HStack(12,
         new BorderElement(Empty())
             .Background(token)
             .Size(40, 24)
-            .WithBorder("#DDDDDD"),
+            .WithBorder(Theme.ControlStroke),
         TextBlock(name).Width(220),
         TextBlock(token.ResourceKey).Opacity(0.6)
     );
@@ -94,10 +94,13 @@ class SwatchGrid : Component
 // aware modifiers like .Background / .Foreground. Use Theme.* tokens (or
 // Theme.Ref("...") for a custom XAML resource key) so the value follows the
 // theme switch.
+//
+// Don't:
+// Button("Click me", () => { }).Background("#0066CC");
 class HardcodedColorBad : Component
 {
     public override Element Render() =>
-        Button("Click me", () => { }).Background("#0066CC");   // REACTOR_THEME_001
+        Button("Click me", () => { }).Background(Theme.Accent);
 }
 // </snippet:bad-hardcoded>
 
@@ -108,6 +111,45 @@ class ThemeRefGood : Component
         Button("Click me", () => { }).Background(Theme.Accent);
 }
 // </snippet:good-theme-ref>
+
+class CustomKeyButton : Component
+{
+    public override Element Render() =>
+        // <snippet:custom-key>
+        // Reference any XAML resource by string key — covers app-level overrides
+        // and any token Reactor doesn't surface as a typed accessor.
+        Button("Custom", () => { })
+            .Background(Theme.Ref("MyAppTitleBarBackground"));
+        // </snippet:custom-key>
+}
+
+class BrandPrimaryButton : Component
+{
+    public override Element Render() =>
+        // <snippet:brand-primary-button>
+        Button("Buy now", BuyAction)
+            .Background(Theme.Ref("BrandPrimaryBrush"));
+        // </snippet:brand-primary-button>
+
+    private void BuyAction()
+    {
+    }
+}
+
+class LightPreviewPane : Component
+{
+    public override Element Render()
+    {
+        var content = VStack(8,
+            TextBlock("Print preview").Foreground(Theme.PrimaryText),
+            TextBlock("Always rendered with light theme tokens.")
+                .Foreground(Theme.SecondaryText));
+
+        // <snippet:per-element-theme>
+        return ScrollView(content).RequestedTheme(ElementTheme.Light);
+        // </snippet:per-element-theme>
+    }
+}
 
 // <snippet:status-banner>
 // Map a severity onto the Signal token pair (foreground + matching

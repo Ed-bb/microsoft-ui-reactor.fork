@@ -1,21 +1,22 @@
 # Testing Reactor
 
-Reactor has three test suites. Each lives in its own project, so there are no filters to remember — one command per suite.
+Reactor has four test suites. Each lives in its own project, so there are no filters to remember — one command per suite.
 
 | # | Suite | Project | Runner | What it tests |
 |---|-------|---------|--------|---------------|
 | 1 | **Unit** | `tests/Reactor.Tests` | xUnit (MTP) | Algorithms, reconciliation, Yoga layout, hooks, D3 — no WinUI window |
 | 2 | **Selftest** | `tests/Reactor.SelfTests` | MSTest (MTP; wraps TAP subprocess) | Full reconciler pipeline against real WinUI controls, in-process |
-| 3 | **E2E** | `tests/Reactor.AppTests` | MSTest (MTP) + winapp ui | Cross-process UIA validation, real user input |
+| 3 | **Packaged selftest** | `tests/Reactor.PackagedTests` | MSTest (MTP; wraps TAP subprocess) | The same fixtures under **MSIX package identity** |
+| 4 | **E2E** | `tests/Reactor.AppTests` | MSTest (MTP) + winapp ui | Cross-process UIA validation, real user input |
 
 Every suite runs on **Microsoft.Testing.Platform**. `global.json` sets
 `test.runner` to `Microsoft.Testing.Platform` because xunit.v3 v4 dropped the
-VSTest bridge; the two MSTest projects set `EnableMSTestRunner` so they speak the
+VSTest bridge; the MSTest projects set `EnableMSTestRunner` so they speak the
 same protocol. The suite commands below are unchanged — MTP still takes the
 project positionally — but the VSTest-era *flags* have MTP spellings (see
 [Flag translation](#flag-translation)).
 
-## Three commands
+## Four commands
 
 ```bash
 # 1. Unit
@@ -24,14 +25,17 @@ dotnet test tests/Reactor.Tests -p:Platform=x64
 # 2. Selftest (in-process WinUI, ~10s; no filter needed)
 dotnet test tests/Reactor.SelfTests
 
-# 3. E2E (requires the winapp CLI)
+# 3. Packaged selftest (registers an MSIX layout; needs Developer Mode)
+dotnet test tests/Reactor.PackagedTests -p:Platform=x64
+
+# 4. E2E (requires the winapp CLI)
 dotnet test tests/Reactor.AppTests
 
-# All three
-dotnet test tests/Reactor.Tests && dotnet test tests/Reactor.SelfTests && dotnet test tests/Reactor.AppTests
+# All four
+dotnet test tests/Reactor.Tests -p:Platform=x64 && dotnet test tests/Reactor.SelfTests && dotnet test tests/Reactor.PackagedTests -p:Platform=x64 && dotnet test tests/Reactor.AppTests
 ```
 
-Both `Reactor.SelfTests` and `Reactor.AppTests` declare a `ProjectReference` to `Reactor.AppTests.Host` with `ReferenceOutputAssembly="false"`, so `dotnet test` rebuilds the Host first. No stale binaries.
+`Reactor.SelfTests` and `Reactor.AppTests` declare a `ProjectReference` to `Reactor.AppTests.Host` with `ReferenceOutputAssembly="false"`, so `dotnet test` rebuilds the Host first. No stale binaries. `Reactor.PackagedTests` does the same for `Reactor.PackagedTests.Host`.
 
 ## Flag translation
 
@@ -63,6 +67,64 @@ packages are already referenced by the projects that need them.
 > `--filter-class "*SwallowedErrorAudit*"` both select the same 11 tests, and
 > `--filter-class` against `tests/Reactor.SelfTests` exits 5.
 
+### MSBuild switches are not `dotnet test` switches
+
+Every flag on a `dotnet test` command line is handled by one of two layers, and it
+matters which:
+
+1. **`dotnet test` itself** recognises a set of options and uses them to drive the build
+   and the run — `-p:` / `--property`, `-c`, `-f`, `-r`, `-a` / `--arch`, `--os`, `-v`,
+   `-e`, `-t:` / `-target:`, `--no-build`, `--no-restore`, `-bl`.
+2. **Everything else is forwarded verbatim to the test executable**, where MTP and the
+   xUnit runner parse it. That is not a failure mode — it is how the whole table above
+   works. `--filter-class`, `--parallel`, `--max-threads`, `--report-trx` and `--hangdump`
+   are all forwarded, and all valid.
+
+The run breaks only when a token is recognised by **neither** layer. MTP then rejects it as
+an unknown option and exits **5 (`InvalidCommandLine`)** before a single test runs.
+MSBuild-only switches are the common way to land in that gap: they look like build flags,
+but `dotnet test` does not accept them and the test host has never heard of them.
+
+| Handled by `dotnet test` | Forwarded, and valid | Recognised by neither — breaks the run |
+|---|---|---|
+| `-p:` / `--property`, `-c`, `-f`, `-r`, `-a` / `--arch`, `--os`, `-v`, `-e`, `-t:` / `-target:`, `--no-build`, `--no-restore`, `-bl`, `--results-directory`, `--minimum-expected-tests` | `--filter`, `--filter-class`, `--filter-trait`, `--parallel`, `--max-threads`, `--report-trx`, `--hangdump` | `-m` / `-maxcpucount`, `-nodereuse` / `-nr`, `--nologo`, `-warnaserror`, `-graphBuild` |
+
+Two of these are counter-intuitive enough to call out. `--nologo` is a real `dotnet build`
+switch and reads like a harmless one, but `dotnet test` does not accept it, so it kills the
+run exactly like `-m:1`. Conversely `-t:`/`-target:` **is** accepted, even though
+`dotnet test --help` does not list it — so "not in `--help`" is not a reliable test for
+whether a flag is safe. When in doubt, run the command against a known-passing filter and
+check that the test count is non-zero.
+
+Environment variables are not argv tokens, so `MSBUILDDISABLENODEREUSE=1` is safe. The test
+host does inherit it — child processes inherit the environment — but it is never parsed as
+an MTP option, which is what the rejection above turns on.
+
+So when a build needs `-m:1 -nodereuse:false` (the `CS2012 …\intermediatexaml\Reactor.dll`
+race — see [`AGENTS.md`](AGENTS.md) field notes), split the command in two:
+
+```bash
+dotnet build tests/Reactor.Tests -p:Platform=x64 -p:SkipSignaturesGen=true -m:1 -nodereuse:false
+dotnet test  tests/Reactor.Tests --no-build -p:Platform=x64
+```
+
+**Recognising the failure.** Nothing prints *why* the command line was rejected — the test
+host's message is not surfaced — so the run looks like this, and the summary prose scans as
+green even though nothing ran:
+
+```text
+...\Reactor.Tests.dll (net10.0-windows10.0.22621.0) Zero tests ran
+Test run summary: Zero tests ran
+  error: 1
+  total: 0   failed: 0   succeeded: 0   skipped: 0
+```
+
+The reliable tell is the module label. A run that started prints the handshake-derived
+`net10.0|x64`; a rejected one falls back to the project's full
+`net10.0-windows10.0.22621.0`, because the test host died before its handshake. Exit 5 is
+*invalid command line* — the same code MSTest returns for `--filter-class` above — and is
+**not** MTP's zero-tests policy, which is exit 8. (Issue #1140.)
+
 ## When to write which test
 
 | If you're testing… | Write a… |
@@ -70,6 +132,7 @@ packages are already referenced by the projects that need them.
 | An algorithm, pure function, record equality, hook bookkeeping, D3 math — anything that doesn't need a WinUI window | **Unit test** in `tests/Reactor.Tests/` |
 | How an element mounts/updates against a real WinUI control, layout math against real Yoga+XAML, reconciler behavior end-to-end, assertions via `VisualTreeHelper` | **Selftest fixture** in `tests/Reactor.AppTests.Host/SelfTest/Fixtures/` (registered in `SelfTestFixtureRegistry`, wrapped by a `[TestMethod]` in `SelfTestBatch`) |
 | Real user input (clicks, keystrokes, tab navigation), UIA properties as seen by assistive tech, cross-process behavior, XAML Island interop | **E2E test** in `tests/Reactor.AppTests/Tests/` |
+| Anything that changes under **MSIX package identity** — `ms-appx:` resolution, `Package.Current`, MRT lookups, `PackageRuntime.IsPackaged` branches | **Selftest fixture** as above, gated with `PackagedIdentityFixtures.RequirePackagedTier` so it self-skips in the unpackaged tier |
 
 Rule of thumb: start with a unit test. Drop to selftest only when you need a live control. Reach for E2E only when you need cross-process UIA — E2E is the slowest and flakiest tier.
 
@@ -442,7 +505,56 @@ A native crash terminates the AOT process — the per-fixture managed watchdog c
 
 ---
 
-## 3. E2E tests (`tests/Reactor.AppTests`) — MSTest + winapp ui
+## 3. Packaged selftest (`tests/Reactor.PackagedTests`) — MSTest + TAP, under MSIX identity
+
+Tier 2's fixture corpus, run inside a process that has **MSIX package identity**.
+
+Every other tier runs unpackaged, so anything consulting package identity — `ms-appx:` resolution,
+`Package.Current`, MRT, the `PackageRuntime.IsPackaged` branches — is asserted nowhere. #1145 was
+exactly that shape: a packaged-only icon bug whose selftest stayed green for its whole life.
+
+`Reactor.PackagedTests.Host` owns no source; it links every `.cs` from `Reactor.AppTests.Host` and
+adds only MSIX properties and a `Package.appxmanifest`, so the two hosts cannot drift. The shim
+registers that layout and launches its `uap5:AppExecutionAlias` stub, which keeps package identity
+while still inheriting stdout — so the TAP contract and flags from tier 2 are reused unchanged.
+
+### Writing a packaged fixture
+
+Fixtures live in the shared corpus (`tests/Reactor.AppTests.Host/SelfTest/Fixtures/`) and gate
+themselves:
+
+```csharp
+if (!PackagedIdentityFixtures.RequirePackagedTier(H, this)) return;
+```
+
+They run for real here and emit a single TAP skip in the unpackaged tier. Register them with the
+**`Packaged_`** prefix — that is what the shim's `IdentityDependentFixtures_Actually_Asserted`
+guard uses to decide which fixtures must never skip.
+
+The gate keys off the entry assembly, not `PackageRuntime.IsPackaged`: a fixture that skipped
+whenever identity was missing would report green if this tier ever ran without it.
+
+### Scope and knobs
+
+The whole corpus runs under identity (~5 min, on its own CI runner).
+
+| Environment variable | Effect |
+|---|---|
+| `REACTOR_PACKAGED_FILTER=<substring>` | Narrow to a subset. `Packaged_IdentityGuard` is fetched in a second pass if your filter excludes it. |
+| `REACTOR_PACKAGED_HOST_DIR=<dir>` | Use a different built layout. Absolute, cwd-relative, or repo-relative. |
+| `REACTOR_PACKAGED_TIMEOUT_SECONDS=<n>` | Override the 900 s process budget. |
+
+### Requirements
+
+- **Developer Mode** (or sideloading) — registering an unsigned loose layout needs it. Without it
+  the tier **fails** rather than skipping.
+- Build with `-p:Platform=x64` (or `ARM64`), like any WinUI app project.
+- The registration is removed in `ClassCleanup` and again by the CI job's `always()` step; a leaked
+  one owns the alias and would make the next run exercise a stale binary.
+
+---
+
+## 4. E2E tests (`tests/Reactor.AppTests`) — MSTest + winapp ui
 
 End-to-end tests that use the winapp CLI (`winapp ui`) to simulate real user input (clicks, keyboard, tab navigation) through the cross-process UI Automation pipeline. These verify the full input → render → output path and validate that UIA properties are visible to assistive technology.
 
