@@ -638,9 +638,10 @@ class WithKeyDemo : Component
 ![WithKey demo](images/collections/withkey.png)
 
 The typed collections (`ListView<T>`, `LazyVStack<T>`, `GridView<T>`) handle
-keying automatically through their `keySelector` parameter. You only need
-`.WithKey()` manually when using `ForEach`, `Select().ToArray()`, or other
-manual list rendering.
+keying automatically through their `keySelector` parameter, and `ForEach`
+does the same for items that implement `IReactorKeyed`. You only need
+`.WithKey()` manually for `Select().ToArray()`, for `ForEach` over items
+that carry no identity, or when you want a key other than `item.Key`.
 
 Rules for good keys:
 
@@ -875,7 +876,8 @@ class LetterJump : Component<IReadOnlyList<Person>>
                     {
                         if (groupStarts.TryGetValue(letter, out var start))
                             listRef.Current?.ScrollToIndex(start);
-                    }).AutomationName($"Jump to {letter}")))
+                    }).AutomationName($"Jump to {letter}")
+                        .WithKey(letter.ToString())))
         );
     }
 }

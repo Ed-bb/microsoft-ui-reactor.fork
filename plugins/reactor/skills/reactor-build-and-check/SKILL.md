@@ -75,6 +75,7 @@ Additional flags:
 
 | ID | Severity | What it means | Fix |
 |---|---|---|---|
+| `CS9137` | error | *"The 'interceptors' feature is not enabled in this namespace."* The source-map generator emitted an interceptor but `InterceptorsNamespaces` does not list `Microsoft.UI.Reactor.Generated`. | You almost never hit this from a PackageReference — `build/Microsoft.UI.Reactor.targets` pairs the two settings automatically. It appears when a project sets `<ReactorSourceMap>true</ReactorSourceMap>` in its own body *after* the targets were imported (in-repo projects, where `Directory.Build.props` imports them early). Add `<InterceptorsNamespaces>$(InterceptorsNamespaces);Microsoft.UI.Reactor.Generated</InterceptorsNamespaces>` alongside it, or drop the explicit property and let the Debug default apply. |
 | `REACTOR_HOOKS_001` | warning | Hook called inside `if` / `for` / `while` / `switch` / `try` | Move the hook to the top of `Render()`. Use the result conditionally, not the call. |
 | `REACTOR_HOOKS_004` | warning | Hook `deps` contains a freshly-allocated object/array/lambda | Memoize with `UseMemo`, hoist to a field, or project to a scalar key. |
 | `REACTOR_HOOKS_005` | warning | Hook called outside `Render()` or a custom-hook method | Move the call into `Render()` or a `Use*` helper. Hooks read slot state that only exists during render. |
@@ -89,11 +90,12 @@ Additional flags:
 | `REACTOR_HOOKS_013` | warning | `UseState(new List<…>())` / `UsePersisted(key, new …())` re-allocates the initial value every render; the hook only reads it once | Wrap it in `UseMemo(() => new …(), [])` so it allocates once. Not `UseRef` — it eager-allocates too. |
 | `REACTOR_CTX_001` | info | `.Provide(ctx, new …())` of a reference-equality type (plain class/array/collection) re-allocates each render and re-renders every `UseContext` consumer | Memoize it: `.Provide(ctx, UseMemo(() => new …(), deps))`, or provide a `record` (context diffs by `Equals`). |
 | `REACTOR_PERF_FUNCREF` | info | `new Command { … }` built inline in `Render()`/a `Use*` hook (re-allocated every render) | Wrap it: `var save = UseMemo(() => new Command { … }, deps);` to keep a stable instance across renders. Pure allocation hygiene — deps are the render values the command captures. |
-| `REACTOR_DSL_001` | warning | `Select(...)` projecting into a layout container without `.WithKey(...)` | `items.Select(i => Row(i).WithKey(i.Id)).ToArray<Element?>()`. Keys keep focus + animation state across reorders. |
+| `REACTOR_DSL_001` | warning | `Select(...)` or `ForEach(...)` projecting into a layout container without `.WithKey(...)` | `items.Select(i => Row(i).WithKey(i.Id)).ToArray<Element?>()`. Keys keep focus + animation state across reorders. Silent for `ForEach` over `IReactorKeyed` items — the factory keys those itself. |
 | `REACTOR_DSL_002` | info | `.WithKey(...)` keyed off the list index or a per-render value (`Guid.NewGuid()`, `DateTime.Now`/`UtcNow`, `Random`, `Environment.TickCount`) | Key off the item's stable id: `items.Select((i, idx) => Row(i).WithKey(i.Id))`. An index / per-render key re-mounts rows on insert/reorder, exactly like no key. |
 | `REACTOR_GRID_001` | warning | A declared `Grid` column/row that no child is placed in (unused track) | Remove the leftover `GridSize` track, or place a child there with `.Grid(row:, column:)`. Only fires when every child's placement is statically visible. |
 | `REACTOR_MOD_001` | info | Same atomic-placement modifier twice in one chain (`.Grid(row: 1).Grid(column: 2)`) — atomic-replace, so `row` resets to 0 | Merge into one call: `.Grid(row: 1, column: 2)`. Applies to `.Grid`/`.Canvas`/`.RelativePanel`/`.Flex`. |
 | `REACTOR_DSL_003` | warning | Typed collection (`ListView<T>`/`GridView<T>`/`LazyVStack<T>`/…) `keySelector` returns a constant/null or ignores its item | Key by a stable, unique item property: `ListView(items, i => i.Id, (i, _) => Row(i))`. A constant key collides every row → keyed-diff bailout → full list re-realization. |
+| `REACTOR_DSL_004` | info | `.WithKey(item)` or `.WithKey(item.Key)` inside a `ForEach` whose items implement `IReactorKeyed` — the factory already assigns that exact key | Usually just delete the call. No auto-fix: if the receiver picks up a key inside a called factory, the call is an override and removing it would change the key. Only these two spellings are reported; `.WithKey(item.Id)` or any other expression is left alone. |
 | `REACTOR_THEME_001` | warning | Hardcoded color on a themed surface | Use `Theme.*` tokens (e.g. `Theme.PrimaryText`, `Theme.CardBackground`). See `reactor-design`. |
 | `REACTOR_THEME_002` | info | Lightweight styling opportunity | Optional. Use `.Resources(r => r.Set("ButtonBackground", …))` for visual-state overrides. |
 | `REACTOR_THEME_003` | info | `RequestedTheme` modifier available | Use `.RequestedTheme(ElementTheme.Dark)` for subtree theme overrides. |
@@ -146,6 +148,15 @@ If a `REACTOR_*` ID isn't in this table, the bundled analyzer DLL has more docs.
 - **Don't introspect via `[System.Reflection]`.** Enumerating Reactor types or members at runtime to "discover" the API is unnecessary and slow. This cheat table plus `mur check`'s did-you-mean suggestions plus `reactor-dsl/references/reactor.api.txt` cover the surface.
 - **Trust the analyzer over your memory.** If `REACTOR_DSL_001` says "missing `.WithKey`", add `.WithKey(...)` — the analyzer is right.
 - **Don't bypass.** Avoid `#pragma warning disable REACTOR_*` unless you have a specific known reason. The analyzers exist because the runtime symptoms are subtle (focus loss, identity drift, refetch storms).
+
+## Build properties
+
+Consumer-facing MSBuild properties the package honours.
+
+| Property | Default | Effect |
+|---|---|---|
+| `ReactorSourceMap` | `true` in Debug, unset in Release | Runs the source-map interceptor generator, which stamps each DSL call site's file and line onto `Element.CallSite`. Read it back with `ReactorSourceMap.GetSource(uiElement)`. Follows the build configuration by default, mirroring WPF's `XamlDebuggingInformation`, but the generator is gated on this property alone — setting it `true` in Release does generate interceptors and embeds mapped source paths in the binary, so only do that for a build you do not distribute. Locations populate only while the runtime flag `ReactorSourceMap.Enabled` is on: the devtools verb sets it automatically, and a host with its own inspector can assign it directly or start the process with `REACTOR_SOURCEMAP=1`. A Debug build that never turns it on does no stamping and no extra cloning, so source mapping adds no allocation of its own; the one always-on cost is that `ElementExtras` carries a 24-byte `CallSite` field whenever an element allocates that bucket at all, flag or no flag (a leaf with no behavioral extras still allocates no bucket — see `ElementExtrasAllocationTests`). Costs roughly 0.5–0.6 ms per intercepted call site at build time — set it to `false` on a very large app if the edit loop matters more than element attribution. Setting it also implies the `InterceptorsNamespaces` entry the generator needs (see `CS9137` above). |
+| `Reactor.DevtoolsSupport` | `false` | Build-time capability gate for the devtools subsystem; without it, devtools is trimmed out of AOT publishes. Set via `<RuntimeHostConfigurationOption Include="Reactor.DevtoolsSupport" Value="true" Trim="true" />`. |
 
 ## Prerequisites
 

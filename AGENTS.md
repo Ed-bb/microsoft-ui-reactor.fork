@@ -144,7 +144,7 @@ Optionally: a factory method in `src/Reactor/Elements/Dsl.cs`, fluent modifiers 
 |---|---|---|
 | Algorithm, pure function, hook bookkeeping, D3 math | Unit test (xUnit) | `tests/Reactor.Tests/` |
 | Element mount/update against real WinUI controls | Selftest fixture | `tests/Reactor.AppTests.Host/SelfTest/Fixtures/` |
-| Behaviour that differs under MSIX identity (`ms-appx:`, `Package.Current`, MRT, `PackageRuntime.IsPackaged` branches) | Selftest fixture gated with `PackagedIdentityFixtures.RequirePackagedTier` | same folder; runs for real in `tests/Reactor.PackagedTests` |
+| Behaviour that differs under MSIX identity (`ms-appx:`, `Package.Current`, MRT, `PackageRuntime.IsPackaged` branches) | Selftest fixture gated with `PackagedIdentityFixtures.RequirePackagedTier` **and** declared `SelfTestTier.Packaged` | same folder; runs for real in `tests/Reactor.PackagedTests` |
 | Real user input, UIA properties, cross-process | E2E test (winapp ui) | `tests/Reactor.AppTests/Tests/` |
 
 Start with unit tests. Use selftests only when you need a live WinUI control. E2E is the slowest tier.
@@ -156,6 +156,16 @@ adds only MSIX properties plus a `Package.appxmanifest`. The whole corpus runs u
 **Gotcha worth not re-deriving:** the manifest's `uap5:AppExecutionAlias` is load-bearing — launching
 the alias stub inherits stdout while keeping package identity, which AUMID activation cannot do
 (it is brokered, so stdout can't be redirected at all).
+**Second gotcha:** a packaged fixture needs *two* declarations, not one. The
+`RequirePackagedTier` gate decides whether the body asserts; `SelfTestFixtureRegistry.TierRequirements`
+decides whether the unpackaged host runs it at all. Skip the second and the fixture self-skips
+into the amber skip inventory on every unpackaged run forever (issue #1154). **The gate is not an
+independent identity check** — it and the tier filter share one entry-assembly predicate, so inside
+the packaged host it always returns true; `Packaged_IdentityGuard` failing its
+`PackageRuntime.IsPackaged` / `Package.Current` assertions is what detects a mis-launched packaged
+host. Consequence worth knowing: **`--list-fixtures` is tier-dependent**, and both hosts print
+`# Total not-applicable fixtures:` / `# Not applicable fixture list:` after `# Total failures:`
+so the exclusion is an assertable fact rather than a silent absence.
 
 ### Console-mutating tests need collection isolation
 
@@ -213,7 +223,16 @@ Hard-won specifics that repeatedly cost sessions time. Prefer these exact comman
   solution defaults; single app/test projects usually do not.)
 - **A green Debug build does not clear the `Build solution` CI job.**
   `TreatWarningsAsErrors` is Release-only and CI builds Release, so verify with
-  `dotnet build Reactor.slnx -c Release`. If `WMC0110` / `WMC1509` follows a C# error,
+  `dotnet restore Reactor.slnx` followed by `dotnet build Reactor.slnx --no-restore -c Release`.
+  Keep those two steps split, exactly as the `Restore` and `Build` steps of the
+  `build-solution` job in `ci.yml` do. The one-shot
+  `dotnet build Reactor.slnx -c Release` also restores under `Configuration=Release`, and NuGet
+  honors `TreatWarningsAsErrors` during restore, so on a proxied or offline feed `NU1900`
+  ("unable to get package vulnerability data") becomes a hard error — measured on this repo, the
+  one-shot form raised NU errors across **127 projects** versus **12** for the split form, burying
+  the real result before a single file compiles. On a healthy feed neither form emits `NU1900` and
+  the distinction is invisible; it only bites behind a TLS-inspecting proxy or offline. CI is
+  immune because it restores without `-c Release`. If `WMC0110` / `WMC1509` follows a C# error,
   treat the markup errors as a likely cascade: fix the earlier error first, then confirm
   they disappear before investigating them independently.
 - **Add `-p:SkipSignaturesGen=true` to local `tests/Reactor.Tests` builds** to avoid the

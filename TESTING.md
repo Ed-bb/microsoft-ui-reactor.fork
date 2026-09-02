@@ -132,7 +132,7 @@ The reliable tell is the module label. A run that started prints the handshake-d
 | An algorithm, pure function, record equality, hook bookkeeping, D3 math — anything that doesn't need a WinUI window | **Unit test** in `tests/Reactor.Tests/` |
 | How an element mounts/updates against a real WinUI control, layout math against real Yoga+XAML, reconciler behavior end-to-end, assertions via `VisualTreeHelper` | **Selftest fixture** in `tests/Reactor.AppTests.Host/SelfTest/Fixtures/` (registered in `SelfTestFixtureRegistry`, wrapped by a `[TestMethod]` in `SelfTestBatch`) |
 | Real user input (clicks, keystrokes, tab navigation), UIA properties as seen by assistive tech, cross-process behavior, XAML Island interop | **E2E test** in `tests/Reactor.AppTests/Tests/` |
-| Anything that changes under **MSIX package identity** — `ms-appx:` resolution, `Package.Current`, MRT lookups, `PackageRuntime.IsPackaged` branches | **Selftest fixture** as above, gated with `PackagedIdentityFixtures.RequirePackagedTier` so it self-skips in the unpackaged tier |
+| Anything that changes under **MSIX package identity** — `ms-appx:` resolution, `Package.Current`, MRT lookups, `PackageRuntime.IsPackaged` branches | **Selftest fixture** as above, gated with `PackagedIdentityFixtures.RequirePackagedTier` **and** declared `SelfTestTier.Packaged` so the unpackaged tier does not run it |
 
 Rule of thumb: start with a unit test. Drop to selftest only when you need a live control. Reach for E2E only when you need cross-process UIA — E2E is the slowest and flakiest tier.
 
@@ -182,6 +182,39 @@ dotnet test tests/Reactor.Tests --filter-class "*ReconcilerMountUpdateTests*"
 ### Console-mutating tests need collection isolation
 
 Tests that write to `Console.Out`/`Console.Error` must be grouped with `[Collection("ConsoleTests")]` to prevent cross-test interference.
+
+### Running the suite under a non-en-US locale
+
+The CI runner's locale is `en-US`, so an *unpinned* test is structurally blind to culture-sensitive defects — a machine-readable string built with the ambient culture, or a test asserting an en-US literal against a deliberately culture-sensitive path. Both stay green in CI and fail only on a contributor's machine. Issue #1159 was exactly this: `D3Color.ToRgb()` emitted `rgba(128, 64, 32, 0,5)` on every comma-decimal locale, and 12 tests failed for anyone outside en-US.
+
+There are two complementary tools, and they do different jobs.
+
+**1. `[CulturedFact]` — pins one test, and runs in CI.** Because the runner sets the culture per test case, a `[CulturedFact(new[] { "nl-NL" })]` guard bites on the en-US CI runner too. That is what makes it a regression gate rather than a local convenience. It replaces `[Fact]`, and the culture is appended to the test's display name (`MyTest[nl-NL]`), so a failure says which culture.
+
+Note the constructor takes a `string[]` — the trailing parameters are compiler-supplied caller info, so it cannot be `params`:
+
+```csharp
+[CulturedFact(new[] { "nl-NL" })]
+public void Formats_With_Comma_Decimal_Separator() { … }
+```
+
+Which culture to pin, and why it matters — picking the wrong one produces a test that cannot fail:
+
+- **`en-US`** when the formatted literal is *incidental* — the test covers a branch and merely needs a stable string. This makes an otherwise silently host-dependent expectation explicit.
+- **A comma-decimal culture (e.g. `nl-NL`)** when the point *is* that the product honours the ambient culture. An en-US pin cannot prove that: invariant and en-US format identically, so the assertion holds whichever the product uses. Only the comma output discriminates.
+
+`CellRenderersTests` carries both halves of that pair as a worked example: `FormatValue_Format_With_Decimal` (en-US, incidental literal) and `FormatValue_Honors_CurrentCulture_Not_Invariant` (nl-NL, proves the contract). Flipping `CellRenderers.FormatValue` to invariant reddens only the second.
+
+**2. `REACTOR_TESTS_CULTURE` — sweeps the whole suite for tests nobody thought to pin.** `[CulturedFact]` only protects code someone already suspected. This env var re-runs *everything* under another locale, which is how you find the next #1159:
+
+```powershell
+$env:REACTOR_TESTS_CULTURE = 'nl-NL'
+dotnet test tests/Reactor.Tests --no-build -p:Platform=x64
+```
+
+`TestSetup.Initialize()` (the `[ModuleInitializer]`) applies it as the assembly's *default* culture, so a `[CulturedFact]` test still overrides it. An unrecognised name, or a process running under invariant globalization, throws rather than silently leaving the run on en-US — a switch that quietly did nothing would report a meaningless pass.
+
+Product code is the mirror image: pin `CultureInfo.InvariantCulture` for anything machine-readable (`rgba(...)`, SVG path data, a dev-tool table meant to read the same everywhere), and leave user-facing text — grid cells, screen-reader summaries — on the current culture.
 
 ### Repo lints ride in this tier
 
@@ -302,12 +335,20 @@ why SKIPPED is not just a politer green. Always put an issue number in the reaso
 one; the reason string is all a reader of the skip report gets. And if you are reaching for a skip
 to silence a flake, fix the flake instead — a skip makes the flake invisible rather than absent.
 
+**"This tier structurally cannot run it" is not on that list, and must not be expressed as a skip.**
+A skip is a per-run observation; tier applicability is a fixed property of the fixture, so a skip
+would restate the same permanent fact on every run and accumulate in the amber inventory — which is
+what [#1154](https://github.com/microsoft/microsoft-ui-reactor/issues/1154) was. Declare the tier in
+`SelfTestFixtureRegistry.TierRequirements` instead and the fixture is simply not selected; see §3.
+
 For raw-TAP consumers (the AOT job pipes `--self-test` straight to a `.tap` artifact and greps
 `^not ok `), the Host emits a `# Total skipped fixtures: N` trailer — placed *after*
 `# Total failures:` so the abort discriminator below is unaffected — followed by
 `# Skipped fixture list: <names>` when non-zero. Each fully-skipped fixture also gets its own
-`# Fully skipped fixture: <name> - N check(s) skipped, 0 assertions ran` line as it happens. The
-three prefixes are deliberately distinct so a grep for one does not match the others.
+`# Fully skipped fixture: <name> - N check(s) skipped, 0 assertions ran` line as it happens.
+Alongside them, and reporting a different thing, come `# Total not-applicable fixtures: N` and
+`# Not applicable fixture list: <names>` (§3) — fixtures that deliberately did **not** run here.
+All five prefixes are deliberately distinct so a grep for one does not match the others.
 
 One fixture, `SelfTestVerdict_OnlySkips_PositiveControl`, is **expected** to be Skipped on every
 run. It asserts nothing on purpose: it is the positive control that proves the SKIPPED verdict
@@ -520,19 +561,70 @@ while still inheriting stdout — so the TAP contract and flags from tier 2 are 
 
 ### Writing a packaged fixture
 
-Fixtures live in the shared corpus (`tests/Reactor.AppTests.Host/SelfTest/Fixtures/`) and gate
-themselves:
+Fixtures live in the shared corpus (`tests/Reactor.AppTests.Host/SelfTest/Fixtures/`). Two steps,
+and both are load-bearing. **Gate** the fixture body:
 
 ```csharp
 if (!PackagedIdentityFixtures.RequirePackagedTier(H, this)) return;
 ```
 
-They run for real here and emit a single TAP skip in the unpackaged tier. Register them with the
-**`Packaged_`** prefix — that is what the shim's `IdentityDependentFixtures_Actually_Asserted`
-guard uses to decide which fixtures must never skip.
+and **declare** its tier in `SelfTestFixtureRegistry.TierRequirements`, beside its entry in
+`AllFixtures`:
+
+```csharp
+["Packaged_MyNewThing"] = SelfTestTier.Packaged,
+```
+
+Register it with the **`Packaged_`** prefix — that is what the shim's
+`IdentityDependentFixtures_Actually_Asserted` guard uses to decide which fixtures must never skip.
+
+The two steps do different jobs and neither replaces the other. The **declaration** governs
+*selection*: an undeclared fixture is offered to every tier, so the unpackaged host runs it, hits
+the gate, and emits a skip that lands in the run's amber skip inventory — a permanent entry
+describing a condition that is structural rather than incidental
+([#1154](https://github.com/microsoft/microsoft-ui-reactor/issues/1154)). The **gate** is what
+makes that mistake degrade gracefully: without it the fixture would reach `ApplicationData.Current`
+unpackaged and report an opaque `COMException` instead of a skip that states its reason.
+
+> **The gate is not a second, independent identity check — do not read it as one.** It and the
+> tier filter both call `PackagedIdentityFixtures.IsPackagedTier`, which compares the *entry
+> assembly name* and nothing else. Inside the packaged host it returns true whether or not the
+> process actually has MSIX identity, so the gate can never skip there. A mis-launched packaged
+> host — broken registration, stale alias, running the `.exe` straight out of the build output —
+> is caught by **`Packaged_IdentityGuard`**, which asserts `PackageRuntime.IsPackaged`,
+> `Package.Current` and the install location and **fails** when they don't hold. That failure, and
+> `IdentityDependentFixtures_Actually_Asserted` requiring the guard to have *passed*, is the whole
+> of the identity evidence.
+
+So `--list-fixtures` is **tier-dependent**: the unpackaged host does not list, and does not run,
+the fixtures declared `SelfTestTier.Packaged`. Both hosts print what they excluded, after
+`# Total failures:`:
+
+```
+# Total not-applicable fixtures: 3
+# Not applicable fixture list: Packaged_IdentityGuard, Packaged_SettingsStoreRoundTrip, …
+```
+
+That trailer exists because the fix for #1154 was a *removal*, and success and catastrophe produce
+the same observation when you fix something by removing it: "no amber" is what you get whether the
+filter works or whether somebody deleted the packaged corpus. Both shims assert on the trailer,
+and they demand opposite things — `SelfTestBatch.NotApplicableFixtures_AreExcludedFromThisTier`
+requires a non-empty list and that none of those names reached discovery or the run;
+`PackagedSelfTestBatch.EveryFixture_IsApplicableToThePackagedTier` requires **zero**. A tier probe
+stuck on one answer would otherwise look correct from whichever side agreed with it. For the same
+reason a *missing* trailer is never read as a count of zero — that would let a host which stopped
+reporting satisfy the packaged assertion by silence.
 
 The gate keys off the entry assembly, not `PackageRuntime.IsPackaged`: a fixture that skipped
-whenever identity was missing would report green if this tier ever ran without it.
+whenever identity was missing would treat the fault as an excuse, reporting green where the tier
+should be red. The guard fixture fails instead — which is the behaviour that makes the requirement
+structural.
+
+If a fixture ever needs the *absence* of identity, adding a mirror `SelfTestTier.Unpackaged` is
+deliberately **two** changes, not one: the enum member, and relaxing
+`EveryFixture_IsApplicableToThePackagedTier` — which today requires the packaged host to exclude
+nothing, so the first unpackaged-only fixture would fail it while behaving correctly. Do both at
+once, with a real fixture to pin the contract against.
 
 ### Scope and knobs
 
