@@ -244,7 +244,7 @@ Markdown(string markdown, MarkdownOptions options)
 
 > **Package note.** `Markdown(...)` ships in the optional
 > `Microsoft.UI.Reactor.Advanced` package (spec 062 §7). Add a
-> `<PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.14" />` and import
+> `<PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.15" />` and import
 > its factories alongside the core ones:
 > `using static Microsoft.UI.Reactor.Advanced.Factories;`. Both overloads
 > return the base `Element`, and `MarkdownOptions` stays in
@@ -277,7 +277,8 @@ class MarkdownDemo : Component
 `Markdown` is the largest Reactor-original control on this page. It
 parses GitHub-flavored Markdown with the embedded `md4c` parser and
 emits a Reactor element tree: headings become `TextBlock` with the
-heading variant, list items become `HStack`s, links become inline
+heading variant, list items become two-column `Grid`s (`Auto` marker / `*`
+content), links become inline
 hyperlinks, code spans become monospace `TextBlock`. No WebView, no HTML
 round-trip — the output composes with every other modifier on this page
 (`.Padding`, `.Width`, `.TextWrapping`).
