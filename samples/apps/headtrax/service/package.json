@@ -19,8 +19,11 @@
     "cors": "^2.8.5",
     "express": "^4.22.2"
   },
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || ^23.5.0"
+  },
   "devDependencies": {
-    "@faker-js/faker": "^10.5.0"
+    "@faker-js/faker": "^10.6.0"
   },
   "overrides": {
     "express": {
