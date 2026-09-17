@@ -41,6 +41,11 @@ Conventions for contributors:
 
 ### Fixed
 
+- **Content-collapse parking for recycled ItemsView rows (issue #1213).**
+  Parking collapses template content instead of the outer container and restores
+  its original visibility value source on reuse. Recycled rows are excluded from
+  scroll anchoring, preventing invalid-anchor and layout-cycle failures.
+
 - **Tray icon `Click` and `RightClick` no longer fire twice per interaction
   (spec 036 §11.4, issue #1180).** Under `NOTIFYICON_VERSION_4` the shell
   forwards both the legacy mouse message and the version-4 semantic

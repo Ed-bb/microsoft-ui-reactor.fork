@@ -107,15 +107,26 @@ jobs:
           if [ "$count" -gt 0 ]; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo "any=false" >> "$GITHUB_OUTPUT"; fi
 
   check:
-    name: ${{ matrix.project.dir }}
+    name: ${{ matrix.project.dir }} (${{ matrix.os }})
     needs: discover
     # An empty matrix is an error rather than a skip, so gate the whole job.
     if: needs.discover.outputs.any == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         project: ${{ fromJSON(needs.discover.outputs.projects) }}
+        # Linux alone is structurally blind to a whole class of breakage here,
+        # and this repo is Windows-first. This matrix earned itself
+        # immediately: the better-sqlite3 11 -> 13 bump passed every
+        # ubuntu-latest job and failed windows-latest outright, because v13
+        # drops the prebuild-install script and npm's implicit `node-gyp
+        # rebuild` then has to resolve a Visual Studio toolset that node-gyp
+        # 11.5.0 cannot identify on that image (see the better-sqlite3 ignore
+        # entry in .github/dependabot.yml). An ubuntu-only matrix would have
+        # reported green while shipping a sample no Windows contributor could
+        # install.
+        os: [ubuntu-latest, windows-latest]
     steps:
       # persist-credentials: false — `npm ci` runs lifecycle scripts from
       # PR-controlled dependencies, and the project's own scripts run right
@@ -125,12 +136,25 @@ jobs:
         with:
           persist-credentials: false
 
-      # Node 22, not latest: better-sqlite3 ^11.7.0 (HeadTrax) cannot build on
-      # Node 26, which removed the V8 APIs it uses. On 22 it takes a prebuilt
-      # binary.
+      # Node 22.13.0 exactly, not '22'. Four of the six projects here declare a
+      # Node engine -- the three React Native harnesses require
+      # `^22.13.0 || ^24.3.0 || >= 26.0.0` via @react-native/eslint-config, and
+      # the HeadTrax service requires `^20.19.0 || ^22.13.0 || ^23.5.0`.
+      # 22.13.0 is the lowest version satisfying both, so pinning it exercises
+      # the floor those projects actually claim to support; `node-version: '22'`
+      # resolves to the newest 22.x and would happily run code relying on APIs
+      # added well after that floor. (src/vscode-reactor declares only
+      # engines.vscode and tools/figma-plugin declares no engine at all, so
+      # neither constrains this pin; they just run on whatever it selects.)
+      #
+      # (This previously read "better-sqlite3 ^11.7.0 cannot build on Node 26".
+      # The real constraint is narrower: v11 declares
+      # `install: prebuild-install || node-gyp rebuild`, so it fetches a
+      # prebuilt binary for the host ABI -- it publishes ABIs 108/115/127/131,
+      # i.e. Node 18/20/22/23 -- and only compiles when none matches.)
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: '22.13.0'
           cache: npm
           cache-dependency-path: ${{ matrix.project.dir }}/package-lock.json
 
@@ -142,6 +166,9 @@ jobs:
 
       - name: Run declared checks
         working-directory: ${{ matrix.project.dir }}
+        # Explicit bash: the Windows runner defaults to pwsh, where
+        # `set -euo pipefail` and the `for` loop below are not valid syntax.
+        shell: bash
         env:
           CHECKS: ${{ matrix.project.checks }}
         run: |
@@ -166,6 +193,8 @@ jobs:
       # about staleness.
       - name: Check committed build output is current
         working-directory: ${{ matrix.project.dir }}
+        # Explicit bash, as above: this script is bash, not pwsh.
+        shell: bash
         run: |
           set -euo pipefail
           stale=0
