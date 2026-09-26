@@ -586,6 +586,137 @@ adds only MSIX properties and a `Package.appxmanifest`, so the two hosts cannot 
 registers that layout and launches its `uap5:AppExecutionAlias` stub, which keeps package identity
 while still inheriting stdout — so the TAP contract and flags from tier 2 are reused unchanged.
 
+### The registered identity is per-checkout, not the one in the manifest
+
+An MSIX `Identity/@Name` is machine-global, and so is an execution alias. Registered literally,
+this tier could only ever run in one checkout at a time: registration is name-scoped rather than
+path-scoped, so a second checkout starting its packaged run would evict the first one's package and
+repoint `%LOCALAPPDATA%\Microsoft\WindowsApps\reactor-packaged-test-host.exe` at its own build
+output — leaving the first run either dead or, worse, silently exercising the wrong binary.
+
+So `AppxLooseLayoutDeployment` derives both from the layout directory before registering, rewriting
+the **generated** `AppxManifest.xml` in the build output:
+
+```text
+Microsoft.UI.Reactor.PackagedTests.Host   ->  Microsoft.UI.Reactor.PackagedTests.Host.w53j3givo
+reactor-packaged-test-host.exe            ->  reactor-packaged-test-host-w53j3givo.exe
+```
+
+The suffix is a hash of the canonicalised layout directory — the build output the package is
+registered from, e.g. `tests\Reactor.PackagedTests.Host\bin\x64\Debug\net10.0-windows…\AppX`. That
+path is stable for a checkout and different between checkouts, so the derived identity is too. Two
+worktrees — or two agents — can run the packaged tier concurrently without seeing each other. The
+derivation itself lives in `tests/_shared/WorktreeIdentity.cs`, linked into both the deployment and
+the host so the two sides cannot disagree about it.
+
+Consequences worth knowing:
+
+- **`Package.appxmanifest` still holds the base identity**, and that is what
+  `Deployment_Constants_Match_The_Manifest` checks. The rewrite only ever touches build output, so
+  it is idempotent and self-healing: a rebuild regenerates the base name and the next run derives
+  again.
+- **Cleanup is scoped to this layout.** `Register()` removes registrations under this layout's
+  derived name, plus any package installed *from this exact directory* (which is what reclaims a
+  registration made under the base name before identities were derived), plus derived-shaped
+  packages whose directory no longer exists (a deleted worktree). None of those rules can match a
+  live checkout other than this one.
+- **Sweeping by hand is machine-wide — and destructive while anything is running.**
+  `Get-AppxPackage -Name 'Microsoft.UI.Reactor.PackagedTests.Host*'` matches *every* checkout's
+  derived package, not just yours, so unregistering what it returns will evict a packaged run
+  happening in another worktree. Use it only as a deliberate clean-slate sweep once all packaged
+  runs have stopped (this is why CI can: the runner has exactly one checkout). Routine per-run
+  cleanup needs no manual step at all — `Register()` already scopes itself to this layout. If you
+  do need to remove one checkout's package while others live, match the exact derived name or the
+  install location rather than the wildcard. Note the bare base name matches nothing once
+  identities are derived.
+- **Filter the publisher before you remove anything.** A name wildcard alone can match a
+  current-user package from a *different* publisher that happens to share the prefix, and a bare
+  `| Remove-AppxPackage` would unregister it. The deployment rewrites only `Identity/@Name`,
+  never `Identity/@Publisher`, so every registration this repo is entitled to remove carries
+  `CN=Microsoft.UI.Reactor.PackagedTests.Host` exactly. Both automated sweeps already filter on
+  it — `AppxLooseLayoutDeployment` at runtime and the `Unregister packaged host` step in CI — so
+  any sweep you run by hand should too:
+
+  ```powershell
+  Get-AppxPackage -Name 'Microsoft.UI.Reactor.PackagedTests.Host*' |
+      Where-Object { $_.Publisher -eq 'CN=Microsoft.UI.Reactor.PackagedTests.Host' } |
+      Remove-AppxPackage
+  ```
+- **`Packaged_IdentityGuard` stays an exact equality check.** It re-derives the expected name from
+  `AppContext.BaseDirectory` rather than being told it, which works because the tier already
+  requires the install location and the running directory to be the same path.
+
+#### Verifying coexistence by hand
+
+The automated tests prove the derivation is *distinct* — different layouts yield different package
+names and different alias stubs, and one layout is stable across reruns. They do not prove Windows
+then keeps two such registrations and two alias stubs alive **at the same time**, because the
+automated tiers only ever register one package per run. That last step is a machine-level fact, so
+it is checked by hand when the derivation or the registration path changes. Tracked as #1264.
+
+Roughly ten minutes, and it needs Developer Mode plus a second checkout:
+
+```powershell
+# 1. Two checkouts, each with the packaged host built. Branch from a ref that actually
+#    CONTAINS the derivation you are testing - origin/main once your change has merged,
+#    otherwise the branch under test. A probe cut from a ref without the derivation
+#    registers the undifferentiated name and the check reads as a failure it did not find.
+git worktree add -b coexist-probe C:\src\probe <ref-with-the-derivation>
+dotnet build tests\Reactor.PackagedTests.Host -p:Platform=x64   # in each checkout
+
+# 2. Start BOTH suites and leave them running. Two shells, started within a few seconds
+#    of each other, so one run's registration overlaps the other's.
+dotnet test tests\Reactor.PackagedTests -p:Platform=x64         # shell 1: checkout A
+dotnet test tests\Reactor.PackagedTests -p:Platform=x64         # shell 2: checkout B (C:\src\probe)
+
+# 3. From a THIRD shell, while both are still running, take the measurement.
+#    Publisher-scoped so a same-prefix package from another publisher cannot be miscounted
+#    as one of ours.
+Get-AppxPackage -Name 'Microsoft.UI.Reactor.PackagedTests.Host*' |
+    Where-Object { $_.Publisher -eq 'CN=Microsoft.UI.Reactor.PackagedTests.Host' } |
+    Select-Object Name, InstallLocation
+Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps\reactor-packaged-test-host*.exe"
+```
+
+**Step 3 has to run while both suites are still going.** Each `dotnet test` unregisters its own
+package in `PackagedSelfTestBatch` class cleanup, so a run that has finished has already removed
+the very registration this is trying to observe: sequential runs never overlap, and waiting for
+both concurrent runs to exit leaves nothing to see. A third shell is the only vantage point from
+which the two-package state exists. If the suites are too quick to catch, raise
+`REACTOR_PACKAGED_TIMEOUT_SECONDS` or run a filtered subset that takes longer.
+
+What it has to show: **two** packages with different `Name` values and different
+`InstallLocation`s, and **two** alias stubs. One of either means the second registration evicted
+the first, which is the failure the derivation exists to prevent, and the tier would then silently
+exercise the wrong binary.
+
+**Last run: PASS.** Recorded here so the check carries evidence rather than a promise. Two
+checkouts of the branch that introduced the derivation, both full packaged suites started within
+seconds of each other, measured from a third shell while both were live:
+
+```text
+Microsoft.UI.Reactor.PackagedTests.Host.w53j3givo  C:\Users\...\azchohfi-jubilant-happiness\tests\...
+Microsoft.UI.Reactor.PackagedTests.Host.wmphu2equ  C:\src\probe\tests\Reactor.PackagedTests.Host\bin\...
+reactor-packaged-test-host-w53j3givo.exe
+reactor-packaged-test-host-wmphu2equ.exe
+```
+
+Two names, two install locations, two stubs. Both suites then ran to completion overlapped at
+**1648 passed / 0 failed** each, which is a stronger result than the check requires: coexisting
+registrations are what it asks for, but two green concurrent corpora also show the two hosts did
+not disturb each other's fixtures. Re-measure when the derivation or the registration path changes;
+a pass recorded against older code is not evidence about new code.
+
+Clean up with the publisher-scoped wildcard sweep described above, once both runs have stopped:
+
+```powershell
+Get-AppxPackage -Name 'Microsoft.UI.Reactor.PackagedTests.Host*' |
+    Where-Object { $_.Publisher -eq 'CN=Microsoft.UI.Reactor.PackagedTests.Host' } |
+    Remove-AppxPackage
+git worktree remove C:\src\probe
+git branch -D coexist-probe
+```
+
 ### Writing a packaged fixture
 
 Fixtures live in the shared corpus (`tests/Reactor.AppTests.Host/SelfTest/Fixtures/`). Two steps,
@@ -697,7 +828,7 @@ dotnet test tests/Reactor.AppTests
 dotnet test tests/Reactor.AppTests --filter "ClassName=Microsoft.UI.Reactor.AppTests.Tests.AccessibilityTests"
 ```
 
-> **Requires:** the **winapp CLI** (`winapp ui`). Install it with `winget install Microsoft.WinAppCli` (or run `./bootstrap.ps1`, which installs it for you). The harness resolves it from `%LOCALAPPDATA%\Microsoft\WindowsApps\winapp.exe` or `winapp` on PATH. Unit and selftest runs don't need it.
+> **Requires:** the **winapp CLI** (`winapp ui`). Install it with `winget install Microsoft.WinAppCli` (or run `./bootstrap.ps1`, which installs it for you). The harness resolves it from `$REACTOR_WINAPP_EXE` (an absolute path, honored first), then `%LOCALAPPDATA%\Microsoft\WindowsApps\winapp.exe`, then `winapp` on PATH. Unit and selftest runs don't need it.
 >
 > **WinForms tests** also require `Reactor.WinFormsTests.Host` to build. It launches a separate WinForms app with a XAML Island.
 
@@ -706,6 +837,138 @@ enough that queue ordering makes a timing-sensitive race always won or always lo
 or `1`) for that environment and tool version. If the defect is *when* state is read rather than
 *whether* input arrived, prove the detector with a mutation before counting repeated green E2E
 runs as evidence.
+
+### The suite runs as one named winapp workflow
+
+> **This section describes a winapp that carries [winappCli#767][winapp767], and nothing in it is
+> in force without one.** That PR *introduced* interactive-desktop coordination wholesale — the
+> lock, the scheduler, the participant registry, the `ui yield` verb, and the coordination call in
+> every `ui` verb. It merged **2026-09-09** and first shipped in **v0.7.0 (2026-09-24)**; every
+> earlier release (v0.6.0, v0.6.1) predates it and has **no turn arbitration at all** — not merely
+> a missing `ui yield`. `setup-WinAppCli` downloads `releases/download/<tag>/winappcli-<arch>.zip`
+> and defaults to `latest`, so CI picked v0.7.0 up automatically. Against an older build the
+> stamped variable is simply an unread environment variable: inert, harmless, and
+> forward-compatible, which is why this wiring started working the day a release carried #767 with
+> no change here. The E2E job records which winapp it resolved and whether the verb is present in its step
+> summary, so this is an observed fact per run rather than an assumption; `ui yield` is a sound
+> sentinel for the whole subsystem precisely because #767 is what added it.
+
+[winapp767]: https://github.com/microsoft/winappCli/pull/767
+
+Every `winapp ui` mutation takes a turn on the interactive desktop, so two agents driving UI at
+once are serialized rather than interleaved. That arbitration is unconditional and cannot be
+switched off. What *is* opt-in is **continuity**: an anonymous `winapp ui` command drops the
+desktop the instant it exits, so a concurrent run can slip in between our click and the assertion
+that reads its result. A command that names its workflow keeps a short post-command idle grace
+instead, which closes that window.
+
+`WinAppUi` therefore stamps `WINAPP_UI_WORKFLOW_ID` onto every child it spawns
+(`WinAppUi.CreateStartInfo` is the single site, so no verb can miss it), and `AppTestBase` yields
+the turn in `[TestCleanup]` once a test has actually used winapp — holding it across the much
+longer gaps *between* tests would block a waiting agent for the idle grace after every test.
+
+The yield is also gated on the resolved winapp implementing `ui yield` at all, probed once per
+test process and cached on `WinAppUi.SupportsUiYield`. Against a pre-#767 build there is no turn
+to release, so the handoff would spawn a `winapp.exe` per UI test only to have it exit on an
+unknown verb.
+
+**The probe reads the command set, not an exit code.** It asks `winapp ui --cli-schema` for the
+command set and looks for `yield` among the subcommand names, falling back to parsing
+`winapp ui --help` on builds that predate that flag (both described below). The obvious cheaper
+probe does not work, and the way it fails is worth knowing, because it looks like it works.
+Measured against winapp 0.6.3-prerelease.92:
+
+```text
+winapp ui yield        --help  -> exit 0   (verb exists)
+winapp ui bogusverbxyz --help  -> exit 0   (verb does NOT exist)
+winapp ui bogusverbxyz         -> exit 1   (control: the non-help path still errors)
+```
+
+An unrecognized verb is not rejected. winapp prints the *parent* help instead — output
+byte-identical to `winapp ui --help`, never naming the token it did not understand — so an
+exit-code probe answers "present" for every verb, including invented ones. Searching that output
+for the verb name fails for the same reason: the parent listing carries every verb's description,
+so the word is there whether or not the verb is. Only a command entry separates them.
+
+The probe asks `winapp ui --cli-schema` first, which answers exactly rather than by inference: it
+emits a JSON object whose `subcommands` keys *are* the command set, so no prose is interpreted and
+a description can never be mistaken for a verb. Parsing `winapp ui --help` is kept as a fallback
+rather than deleted, because a winapp old enough to lack `yield` may also predate `--cli-schema` —
+and that is exactly the build this probe exists to detect, so answering `Unreadable` there would
+throw away a measurement the older path can still make. The help parser reads command entries as
+the lines at the section's *shallowest* indent: renderers wrap long descriptions onto more deeply
+indented continuation lines, whose first word is prose that would otherwise read as a command.
+
+The probe is a tri-state (`WinAppUi.UiVerbSupport`). `Unreadable` is deliberately not folded into
+`Absent`: if no command set comes back, or none of the long-standing verbs (`status`, `inspect`,
+`invoke`) appear in it, then the parse failed and nothing was established — reporting that as
+"the verb is missing" would be publishing a measurement that was never taken, and would also let
+a future reformat of winapp's help read as "yield was removed" forever. Under
+`REACTOR_E2E_REQUIRE_UI_YIELD`, anything short of `Present` fails.
+
+Both attempts share a single 10-second budget, and a schema attempt that *times out* stops the
+probe rather than falling through. A binary that hangs has not reported that `--cli-schema` is
+unsupported, so spawning a second child to hang again would spend the rest of the budget to learn
+nothing — and two independently bounded waits would let an unresponsive winapp cost twice the
+advertised probe time. The worst case is one 10-second wait plus a single 5-second kill grace
+(`TryKill` waits that long for the child to actually go), so 15 seconds rather than 10.
+
+**CI enforces the verb, and proves the gate can fire.** Since winapp v0.7.0 (2026-09-24) ships
+#767, the E2E job runs the suite with `REACTOR_E2E_REQUIRE_UI_YIELD=1`, so an unconfirmed verb
+fails the job instead of skipping. The CLI is deliberately left unpinned (`setup-WinAppCli`
+defaults to `latest`): releases only move forward, so `latest` carries the verb, and a future
+release that dropped it *should* redden the job rather than be hidden by a pin.
+
+That covers the passing arm, but a gate only ever observed passing establishes nothing. The
+`Prove the strict ui yield gate can fail` step therefore points `REACTOR_WINAPP_EXE` at a binary
+that is not winapp and requires the run to fail **and** carry the gate's own message — a bare
+non-zero exit would equally match an invalid command line (5) or a zero-test run (8). Pointing at
+a non-winapp keeps that deterministic no matter which version `latest` resolves to.
+
+An ambient `WINAPP_UI_WORKFLOW_ID` wins, so an agent harness can group a whole test run with its
+own surrounding `winapp ui` calls into one workflow. Only a *usable* value is inherited: winapp
+rejects an empty or over-long id on every single command, so one of those would fail the entire
+suite rather than merely lose continuity, and the harness synthesizes an id instead.
+
+> **Which winapp is "the resolved winapp" matters.** `WinAppUi.ResolveWinAppExe()` prefers
+> `$REACTOR_WINAPP_EXE`, then `%LOCALAPPDATA%\Microsoft\WindowsApps\winapp.exe`, and only then
+> `PATH`. Installing a specific winapp and putting it on `PATH` therefore does not guarantee the
+> suite uses it. CI's capability step resolves *`PATH` ahead of the alias* — deliberately not the
+> harness's order, because `setup-WinAppCli` installs into a tool directory it prepends to `PATH`
+> and never touches LocalAppData, so preferring the alias would mean the build CI just installed
+> is never the one tested — and exports the winner as `REACTOR_WINAPP_EXE`. Since that is the
+> harness's *first* candidate, the two still agree: CI picks, the harness follows. The suite logs
+> the path it resolved beside the capability for the same reason. This was not hypothetical: the
+> step and the suite once reported opposite answers for the verb inside a single job. Note that
+> CI pins the *setup action* by SHA but not the CLI version it installs (the action's `version`
+> input defaults to `latest`), which is deliberate — see the strict-gate note above.
+
+> **This does not stop a non-winapp window stealing the foreground.** Turn arbitration only
+> coordinates winapp callers. On a busy desktop, clicks still fail with
+> `{"error":{"code":"foreground_not_target"}}` when an unrelated app takes the foreground
+> mid-test — a real and reproducible source of local flake that is *not* a product regression.
+> Running the tier on a desktop you are not also using is the only fix for that.
+
+> **Our own Host launch is one of those windows.** The guarantee covers the *body* of a run,
+> not its startup. `HostLaunch.LaunchAndBind` starts the Host and brings its window up directly,
+> before any `winapp ui` call has been made and therefore before this suite holds a turn at all.
+> So two suites whose startups overlap can each foreground a Host while the other is mid-input,
+> and the symptom is an ordinary `foreground_not_target` on the *other* agent's click. Stagger
+> starts if you are launching several runs at once; once both are past `AssemblyInit` the
+> arbitration above applies normally. Closing this properly needs winapp to arbitrate a turn for
+> a process it did not spawn, which is not something the CLI exposes today.
+
+### Don't parallelize the E2E tier
+
+The assembly carries `[assembly: DoNotParallelize]`. That is not a performance preference: the
+tier's tests share a desktop, a workflow id and a process-wide winapp invocation counter, so they
+are not independent in the way parallelization assumes. Two examples of what breaks, both
+silently — a headless test can see the invocation counter move because a *concurrent* UI test
+spawned winapp, and then release the shared turn out from under it; and `WinAppWorkflowIdTests`
+sends a real `ui yield` to prove the wiring works, which would release whatever turn a neighbour
+was holding. MSTest does not parallelize unless asked, so the attribute changes nothing today;
+it is there so a `.runsettings` or a `--parallel` can't flip the assumption the tier is built on
+without anyone noticing, because the resulting failures would read as ordinary UI flake.
 
 ### Don't co-locate the E2E and selftest tiers
 

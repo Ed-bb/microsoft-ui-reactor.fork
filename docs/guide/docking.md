@@ -18,7 +18,7 @@ Docking ships in the optional `Microsoft.UI.Reactor.Advanced` package
 (spec 062 §7). Add its package reference:
 
 ```xml
-<PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.15" />
+<PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.16" />
 ```
 
 Docking is an opt-in element type — register it at host construction
@@ -27,8 +27,6 @@ time, then use `DockManager` like any other Reactor element:
 ```csharp
 ReactorApp.Run<DockingApp>(
     title: "Docking",
-    width: 900,
-    height: 600,
     configure: host => DockingNativeInterop.Register(host.Reconciler));
 ```
 

@@ -46,6 +46,18 @@ public sealed class WinAppUi
 {
     private static readonly string WinAppExe = ResolveWinAppExe();
 
+    /// <summary>
+    /// The winapp binary this process resolved, for diagnostics.
+    /// </summary>
+    /// <remarks>
+    /// Worth recording rather than inferring. <see cref="ResolveWinAppExe"/> prefers an explicit
+    /// override, then <c>%LOCALAPPDATA%\Microsoft\WindowsApps</c>, and only then <c>PATH</c> — so
+    /// a caller that installs a specific winapp and puts it on <c>PATH</c> can still be running a
+    /// different one, and a bare <c>winapp</c> on the command line is not necessarily the binary
+    /// these tests use. Printing the path is what makes those two facts comparable.
+    /// </remarks>
+    internal static string ResolvedWinAppExe => WinAppExe;
+
     private readonly int _pid;
 
     /// <summary>HWND of the primary Host window, captured at session start.</summary>
@@ -57,6 +69,11 @@ public sealed class WinAppUi
         HostHwnd = hostHwnd;
     }
 
+    /// <summary>
+    /// Absolute-path override for the winapp binary, honored ahead of every other candidate.
+    /// </summary>
+    internal const string WinAppExeEnvVar = "REACTOR_WINAPP_EXE";
+
     private static string ResolveWinAppExe()
     {
         // Explicit override — an absolute path to a winapp.exe, honored first.
@@ -65,7 +82,7 @@ public sealed class WinAppUi
         // winapp-dev package), while a newer ui-capable winapp is installed elsewhere
         // (e.g. %LOCALAPPDATA%\Microsoft\WindowsApps\winapp_8wekyb3d8bbwe\winapp.exe).
         // Also lets CI pin an exact winapp build. No effect unless the var is set.
-        var overridePath = Environment.GetEnvironmentVariable("REACTOR_WINAPP_EXE");
+        var overridePath = Environment.GetEnvironmentVariable(WinAppExeEnvVar);
         if (!string.IsNullOrEmpty(overridePath) && File.Exists(overridePath))
             return Path.GetFullPath(overridePath);
 
@@ -90,7 +107,7 @@ public sealed class WinAppUi
 
         throw new WinAppException(
             "Could not find winapp.exe. Install the winapp CLI (winget install Microsoft.WinAppCli) " +
-            "or ensure an absolute PATH entry contains winapp.exe, or set REACTOR_WINAPP_EXE to an " +
+            $"or ensure an absolute PATH entry contains winapp.exe, or set {WinAppExeEnvVar} to an " +
             "absolute path to a ui-capable winapp.exe.");
     }
 
@@ -102,18 +119,445 @@ public sealed class WinAppUi
     /// </summary>
     public static long InvocationCount;
 
+    // ─── UI turn continuity ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// winapp's logical-UI-workflow variable. Every <c>winapp ui</c> mutation takes a turn on the
+    /// interactive desktop whether or not this is set — collision arbitration is unconditional.
+    /// What the variable buys is <em>continuity</em>: a workflow that names itself keeps a
+    /// post-command idle grace, so a second agent driving the same desktop cannot interleave
+    /// between our click and the assertion that reads the result. An anonymous command releases
+    /// the desktop the instant it exits, which is exactly the window a concurrent run slips into.
+    /// </summary>
+    internal const string WorkflowIdEnvVar = "WINAPP_UI_WORKFLOW_ID";
+
+    /// <summary>Mirrors winapp's own cap; a longer value is rejected with InvalidWorkflowId.</summary>
+    internal const int MaxWorkflowIdLength = 256;
+
+    /// <summary>
+    /// UTF-8 that refuses to encode ill-formed UTF-16 instead of substituting U+FFFD — the same
+    /// encoder configuration winapp hashes the workflow id with.
+    /// </summary>
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// The workflow id stamped onto every <c>winapp ui</c> child process, resolved once per test
+    /// process. Public so a failure report can name the workflow that held the desktop.
+    /// </summary>
+    public static string WorkflowId { get; } = ResolveWorkflowId(
+        Environment.GetEnvironmentVariable(WorkflowIdEnvVar),
+        Environment.ProcessId,
+        Guid.NewGuid());
+
+    /// <summary>
+    /// Picks the workflow id for this test process. An ambient value wins, so an agent harness (or
+    /// a developer) can group a whole test run with surrounding manual <c>winapp ui</c> calls into
+    /// one workflow. Only a *usable* ambient value wins: winapp hard-fails an unusable id on every
+    /// single command, so inheriting one would break the entire suite rather than degrade it —
+    /// falling back to a synthesized id is strictly better than propagating a guaranteed error.
+    /// </summary>
+    /// <remarks>
+    /// The three rejection cases are winapp's, not ours: empty/whitespace, longer than
+    /// <see cref="MaxWorkflowIdLength"/>, and text that is not well-formed UTF-16. The last one is
+    /// easy to miss — winapp hashes the id with a strict UTF-8 encoder specifically so that
+    /// distinct ill-formed ids cannot collide onto one owner key, which makes an unpaired
+    /// surrogate a hard error rather than a mangled-but-accepted value.
+    /// </remarks>
+    internal static string ResolveWorkflowId(string? ambient, int pid, Guid unique)
+    {
+        if (!string.IsNullOrWhiteSpace(ambient)
+            && ambient.Length <= MaxWorkflowIdLength
+            && IsWellFormedUtf16(ambient))
+        {
+            return ambient;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture,
+            $"reactor-apptests-{pid}-{unique:N}");
+    }
+
+    /// <summary>
+    /// Whether a string survives strict UTF-8 encoding — i.e. contains no unpaired surrogate.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately asks the same encoder winapp uses rather than scanning for surrogate code
+    /// units by hand, so this cannot drift from the rule it is predicting.
+    /// </remarks>
+    private static bool IsWellFormedUtf16(string value)
+    {
+        try
+        {
+            StrictUtf8.GetByteCount(value);
+            return true;
+        }
+        catch (EncoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the resolved winapp implements <c>ui yield</c> at all, probed once per test
+    /// process and cached.
+    /// </summary>
+    /// <remarks>
+    /// <para>Cooperative UI turns landed whole in winappCli#767, so a build without the verb has
+    /// no turn arbitration to release and every yield is a spawn that can only fail. Asking once
+    /// turns a per-test cost into a per-process one; the probe is forced lazily from
+    /// <see cref="ReleaseUiTurn"/>, so a run that never drives the UI never pays even that.</para>
+    /// <para><see cref="Lazy{T}"/> rather than a plain field because MSTest may run test classes
+    /// in parallel: the default publication mode runs the probe exactly once no matter how many
+    /// threads reach it together, which is the difference between one extra <c>winapp.exe</c> and
+    /// one per worker.</para>
+    /// </remarks>
+    internal static bool SupportsUiYield => YieldVerb.Value == UiVerbSupport.Present;
+
+    /// <summary>
+    /// The raw tri-state behind <see cref="SupportsUiYield"/>, so a caller that must not proceed
+    /// on a guess can tell "winapp says no" from "winapp did not answer".
+    /// </summary>
+    internal static UiVerbSupport UiYieldSupport => YieldVerb.Value;
+
+    private static readonly Lazy<UiVerbSupport> YieldVerb = new(ProbeYieldVerb);
+
+    /// <summary>What a capability probe was able to establish about one <c>winapp ui</c> verb.</summary>
+    internal enum UiVerbSupport
+    {
+        /// <summary>The verb is listed in winapp's command set.</summary>
+        Present,
+
+        /// <summary>The command set was read, and the verb is not in it.</summary>
+        Absent,
+
+        /// <summary>
+        /// No usable command set came back, so nothing was established either way. Distinct from
+        /// <see cref="Absent"/> on purpose: absence is a measurement, this is its failure.
+        /// </summary>
+        Unreadable,
+    }
+
+    /// <summary>
+    /// Asks the resolved winapp whether it understands <c>ui yield</c>, preferring its
+    /// machine-readable command schema and falling back to parsing <c>winapp ui --help</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>This deliberately does not run <c>ui yield --help</c> and check the exit code, which
+    /// is what it used to do. Measured against winapp 0.6.3-prerelease.92, an unrecognized verb
+    /// does not error: <c>ui bogusverbxyz --help</c> exits <c>0</c> and prints output
+    /// byte-identical to <c>ui --help</c>, never mentioning the unrecognized token. The old probe
+    /// therefore answered "yes" for every verb, including ones that do not exist. It happened to
+    /// return the right answer — the published builds that lack <c>yield</c> are old enough to
+    /// still reject unmatched tokens — but it was no longer measuring anything, which would have
+    /// made <c>REACTOR_E2E_REQUIRE_UI_YIELD</c> a gate that cannot fail.</para>
+    /// <para>Grepping the output of <c>ui yield --help</c> for the word "yield" does not fix it
+    /// either, and is the trap worth naming: the fallback help lists every subcommand with its
+    /// description, so the word is present whether or not the verb is. Only a command *entry*
+    /// distinguishes them.</para>
+    /// <para><c>ui --cli-schema</c> is asked first because it answers the question exactly rather
+    /// than by inference: it emits a JSON object whose <c>subcommands</c> keys are the command
+    /// set, so no prose has to be interpreted and description text cannot be mistaken for a verb.
+    /// Measured against 0.6.3-prerelease.92 it exits <c>0</c> and reports 22 subcommands,
+    /// including <c>yield</c> and excluding an invented one. The help parser is kept as a
+    /// fallback rather than deleted because a winapp old enough to lack <c>yield</c> may also
+    /// predate <c>--cli-schema</c>, and that is precisely the case this probe exists to detect —
+    /// answering <see cref="UiVerbSupport.Unreadable"/> there would lose a measurement the older
+    /// path can still make.</para>
+    /// <para>Both attempts share one <see cref="YieldTimeoutMs"/> budget. Two independently
+    /// bounded waits would let a generally unresponsive binary cost twice the advertised probe
+    /// time, and a timed-out first attempt stops the probe outright: a winapp that hangs on
+    /// <c>--cli-schema</c> has not told us the flag is unsupported, so spawning a second child to
+    /// hang again would spend the remaining budget to learn nothing. The wall-clock worst case is
+    /// that budget plus one <see cref="KillGraceMs"/>, since <see cref="TryKill"/> waits for the
+    /// child it killed to actually go.</para>
+    /// </remarks>
+    private static UiVerbSupport ProbeYieldVerb()
+    {
+        try
+        {
+            return ProbeYieldVerb(TryRunBounded, "yield", YieldTimeoutMs);
+        }
+        // Same narrow set as ReleaseUiTurn: these mean "winapp could not be run here". That is
+        // not the verb being absent, and saying so would be claiming a measurement never taken.
+        catch (System.ComponentModel.Win32Exception) { return UiVerbSupport.Unreadable; }
+        catch (InvalidOperationException) { return UiVerbSupport.Unreadable; }
+        catch (NotSupportedException) { return UiVerbSupport.Unreadable; }
+        catch (TypeInitializationException) { return UiVerbSupport.Unreadable; }
+    }
+
+    /// <summary>Runs one bounded <c>winapp ui</c> child; the seam the probe orchestration uses.</summary>
+    internal delegate BoundedRun UiProbeRunner(int timeoutMs, params string[] args);
+
+    /// <summary>
+    /// The schema-first / help-fallback decision, separated from process launching so the
+    /// orchestration itself is testable.
+    /// </summary>
+    /// <remarks>
+    /// Worth a seam rather than testing the two parsers alone: each parser can be correct while
+    /// the sequencing around them is wrong. A regression that returned
+    /// <see cref="UiVerbSupport.Unreadable"/> the moment the schema was unusable would silently
+    /// drop support for every pre-<c>--cli-schema</c> winapp — exactly the builds this probe
+    /// exists to identify — and would leave every parser test green.
+    /// </remarks>
+    internal static UiVerbSupport ProbeYieldVerb(UiProbeRunner run, string verb, int budgetMs)
+    {
+        var clock = Stopwatch.StartNew();
+
+        var schema = run(budgetMs, "--cli-schema");
+
+        // A hang is not a verdict about the flag, and the budget is nearly spent regardless.
+        if (schema.Outcome == BoundedRunOutcome.TimedOut) return UiVerbSupport.Unreadable;
+
+        if (schema.Outcome == BoundedRunOutcome.Completed && schema.ExitCode == 0)
+        {
+            var fromSchema = ParseUiVerbSupportFromSchema(schema.StdOut, verb);
+            if (fromSchema != UiVerbSupport.Unreadable) return fromSchema;
+        }
+
+        var remainingMs = budgetMs - (int)clock.ElapsedMilliseconds;
+        if (remainingMs <= 0) return UiVerbSupport.Unreadable;
+
+        var help = run(remainingMs, "--help");
+
+        // The exit code is not the signal here, but a non-zero one means the text that came
+        // back is not a command list worth parsing.
+        return help is { Outcome: BoundedRunOutcome.Completed, ExitCode: 0 }
+            ? ParseUiVerbSupport(help.StdOut, verb)
+            : UiVerbSupport.Unreadable;
+    }
+
+    /// <summary>
+    /// Verbs that have existed for as long as <c>winapp ui</c> has, used to prove the command
+    /// list was actually parsed before concluding anything from a verb's absence.
+    /// </summary>
+    /// <remarks>
+    /// Several rather than one so a single rename does not turn every run
+    /// <see cref="UiVerbSupport.Unreadable"/>; any one of them is enough to establish that the
+    /// section was found and understood.
+    /// </remarks>
+    private static readonly string[] SentinelUiVerbs = ["status", "inspect", "invoke"];
+
+    /// <summary>
+    /// Reports whether <paramref name="verb"/> is one of the <c>subcommands</c> keys in the JSON
+    /// emitted by <c>winapp ui --cli-schema</c>.
+    /// </summary>
+    /// <remarks>
+    /// Pure, so the discriminator is testable without a winapp on the machine. The same sentinel
+    /// rule as the help parser applies: a schema whose shape changed enough that no long-standing
+    /// verb is visible has not been understood, and reporting <see cref="UiVerbSupport.Absent"/>
+    /// from it would be a conclusion drawn from a failed parse.
+    /// </remarks>
+    internal static UiVerbSupport ParseUiVerbSupportFromSchema(string schemaJson, string verb)
+    {
+        if (string.IsNullOrWhiteSpace(schemaJson)) return UiVerbSupport.Unreadable;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(schemaJson);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return UiVerbSupport.Unreadable;
+            if (!doc.RootElement.TryGetProperty("subcommands", out var subcommands)) return UiVerbSupport.Unreadable;
+            if (subcommands.ValueKind != JsonValueKind.Object) return UiVerbSupport.Unreadable;
+
+            var listed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var entry in subcommands.EnumerateObject()) listed.Add(entry.Name);
+
+            if (!SentinelUiVerbs.Any(listed.Contains)) return UiVerbSupport.Unreadable;
+
+            return listed.Contains(verb) ? UiVerbSupport.Present : UiVerbSupport.Absent;
+        }
+        catch (JsonException) { return UiVerbSupport.Unreadable; }
+    }
+
+    /// <summary>Whitespace a help entry's columns may be separated by.</summary>
+    private static readonly char[] HelpColumnSeparators = [' ', '\t'];
+
+    /// <summary>
+    /// Extracts the <c>Commands:</c> section from <c>winapp ui --help</c> and reports whether
+    /// <paramref name="verb"/> is listed in it.
+    /// </summary>
+    /// <remarks>
+    /// <para>Pure, so the discriminator can be tested against captured help text without a winapp
+    /// on the machine. The sentinel check is what stops a format change from being read as "the
+    /// verb was removed": if not one long-standing verb can be found either, the parse failed
+    /// and the honest answer is <see cref="UiVerbSupport.Unreadable"/>.</para>
+    /// <para>Which lines are entries cannot be decided one line at a time. Help renderers wrap a
+    /// long description onto continuation lines indented to the description column, and the first
+    /// word of one of those is prose, not a command — so a description wrapping before the word
+    /// "yield" would read as the verb being present. Entries are therefore the lines at the
+    /// section's *shallowest* indent, and anything deeper is a continuation.</para>
+    /// </remarks>
+    internal static UiVerbSupport ParseUiVerbSupport(string uiHelp, string verb)
+    {
+        if (string.IsNullOrWhiteSpace(uiHelp)) return UiVerbSupport.Unreadable;
+
+        var lines = uiHelp.Replace("\r\n", "\n").Split('\n');
+
+        var header = Array.FindIndex(
+            lines, l => l.Trim().Equals("Commands:", StringComparison.Ordinal));
+        if (header < 0) return UiVerbSupport.Unreadable;
+
+        var candidates = new List<(int Indent, string Name)>();
+        for (var i = header + 1; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            // The section ends at the next unindented line: entries are indented, headers are not.
+            if (!char.IsWhiteSpace(line[0])) break;
+
+            var trimmed = line.TrimStart();
+            var name = trimmed.Split(HelpColumnSeparators, StringSplitOptions.RemoveEmptyEntries)[0];
+
+            // `verb, alias` listings hang a comma off the name that would defeat an exact match.
+            candidates.Add((line.Length - trimmed.Length, name.TrimEnd(',')));
+        }
+
+        if (candidates.Count == 0) return UiVerbSupport.Unreadable;
+
+        var entryIndent = candidates.Min(c => c.Indent);
+        var listed = new HashSet<string>(
+            candidates.Where(c => c.Indent == entryIndent).Select(c => c.Name),
+            StringComparer.Ordinal);
+
+        if (!SentinelUiVerbs.Any(listed.Contains)) return UiVerbSupport.Unreadable;
+
+        return listed.Contains(verb) ? UiVerbSupport.Present : UiVerbSupport.Absent;
+    }
+
+    /// <summary>
+    /// Releases this workflow's UI turn instead of waiting out the idle grace. Best-effort by
+    /// construction: yielding is an optimization that hands the desktop to a waiting agent sooner,
+    /// so a failure here must never redden a test that already passed. The turn is released by the
+    /// idle grace regardless, making the worst case a short delay rather than a stranded desktop.
+    /// </summary>
+    /// <param name="verbPresent">
+    /// Overrides the cached <see cref="SupportsUiYield"/> probe. Injected so the decision to skip
+    /// the spawn is testable without depending on which winapp the machine happens to resolve —
+    /// the regression worth catching is this gate going missing, and an environment-derived oracle
+    /// could not catch it on a machine whose winapp has the verb.
+    /// </param>
+    /// <returns>
+    /// winapp's exit code, or <see langword="null"/> if the process could not be run at all —
+    /// including when the resolved winapp has no such verb, which is the same "nothing was
+    /// released" outcome from the caller's point of view. Surfaced rather than discarded because
+    /// it is the one externally observable proof that a workflow id reached the child:
+    /// <c>winapp ui yield</c> exits non-zero when the variable is absent and zero when it is
+    /// present.
+    /// </returns>
+    internal static int? ReleaseUiTurn(bool? verbPresent = null)
+    {
+        // Ahead of RecordInvocation, so a winapp that cannot yield costs neither a process nor a
+        // phantom entry in the per-test spawn metric.
+        if (!(verbPresent ?? SupportsUiYield)) return null;
+
+        try
+        {
+            RecordInvocation();
+
+            // Bounded and fully drained: `yield --json` writes an envelope to stdout, and on a
+            // build that rejects the verb it writes to stderr as well. Leaving either redirected
+            // stream unread risks the child blocking on a full pipe until this call times out and
+            // kills it, turning a yield that actually worked into a phantom failure.
+            var run = TryRunBounded(YieldTimeoutMs, "yield", "--json");
+            return run.Outcome == BoundedRunOutcome.Completed ? run.ExitCode : null;
+        }
+        // Narrow rather than bare: the contract is that yielding cannot redden a passing test, and
+        // these are the failures that actually mean "winapp could not be run here" (missing or
+        // unlaunchable executable, a process that died between calls, an unresolvable winapp.exe
+        // surfacing through the static initializer). Something outside this set is not a yield
+        // problem and should surface rather than be silently turned into a null.
+        catch (System.ComponentModel.Win32Exception ex) { return YieldUnavailable(ex); }
+        catch (InvalidOperationException ex) { return YieldUnavailable(ex); }
+        catch (NotSupportedException ex) { return YieldUnavailable(ex); }
+        catch (TypeInitializationException ex) { return YieldUnavailable(ex); }
+    }
+
+    private static int? YieldUnavailable(Exception ex)
+    {
+        Console.WriteLine($"Could not release the winapp UI turn ({ex.GetType().Name}: {ex.Message}). " +
+                          "Falling back to the idle grace.");
+        return null;
+    }
+
+    /// <summary>
+    /// Best-effort termination of a winapp child that overran its timeout, waiting a bounded
+    /// time for it to actually go.
+    /// </summary>
+    /// <remarks>
+    /// The caller is already failing or returning null, so a kill failure changes no outcome —
+    /// but it is reported rather than swallowed, because repeated failures leave orphaned winapp
+    /// processes holding the UI turn, which looks like an unrelated hang in the *next* test.
+    /// <para><see cref="Process.Kill(bool)"/> only <em>requests</em> termination and returns
+    /// immediately, so reporting the kill is not the same as the process being gone. Every
+    /// caller returns or throws the moment this comes back, which put the next test's first
+    /// `winapp ui` call in a race with a child that still held the turn — the same orphan
+    /// symptom the warning above exists to make legible, arrived at through success rather than
+    /// failure. Waiting closes that window; a process still alive after the grace period is
+    /// reported, since at that point it is stuck in the kernel and no further kill will help.</para>
+    /// <para><b>Deliberately untested, because the available oracle was vacuous.</b> A test was
+    /// written asserting the postcondition — exited by the time this returns — and then mutation
+    /// checked by deleting the wait. It stayed green across three consecutive runs: a
+    /// <c>ping.exe</c> probe is already reaped by the time <c>Kill</c> returns, so the healthy
+    /// and broken builds are indistinguishable to it. Shipping it would have implied coverage
+    /// that does not exist, so it was dropped rather than kept green. The guarantee here rests on
+    /// <see cref="Process.Kill(bool)"/> being documented as asynchronous; a real oracle needs a
+    /// process that is slow to die on demand, which nothing in this tier currently provides.</para>
+    /// </remarks>
+    internal static void TryKill(Process proc)
+    {
+        var requested = false;
+
+        try
+        {
+            proc.Kill(entireProcessTree: true);
+            requested = true;
+        }
+        catch (InvalidOperationException ex) { WarnKillFailed(ex); }
+        catch (NotSupportedException ex) { WarnKillFailed(ex); }
+        catch (System.ComponentModel.Win32Exception ex) { WarnKillFailed(ex); }
+        catch (AggregateException ex) { WarnKillFailed(ex); }
+
+        if (!requested) return;
+
+        try
+        {
+            if (!proc.WaitForExit(KillGraceMs))
+            {
+                Console.WriteLine(
+                    $"Timed-out winapp child did not exit within {KillGraceMs}ms of being killed; " +
+                    "it may still hold the UI turn as the next test starts.");
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // The process is gone and its handle no longer answers, which is the outcome the
+            // wait was after. Nothing to report.
+        }
+
+        static void WarnKillFailed(Exception ex) =>
+            Console.WriteLine($"Could not terminate the timed-out winapp child " +
+                              $"({ex.GetType().Name}: {ex.Message}).");
+    }
+
+    /// <summary>
+    /// How long to wait for a killed winapp child to actually exit. Short on purpose: this runs
+    /// only after a timeout has already been paid, and a process that has not gone this long
+    /// after <c>TerminateProcess</c> is blocked in kernel mode, where waiting longer changes
+    /// nothing.
+    /// </summary>
+    private const int KillGraceMs = 5_000;
+
+    private const int YieldTimeoutMs = 10_000;
+
     // ─── Process plumbing ────────────────────────────────────────────────────
 
-    private readonly record struct RunResult(int ExitCode, string StdOut, string StdErr);
-
-    // Bumps the process-global spawn counter from a static scope, keeping the mutation off the
-    // instance Run path while still aggregating across the many short-lived WinAppUi instances.
-    private static void RecordInvocation() => Interlocked.Increment(ref InvocationCount);
-
-    private RunResult Run(int processTimeoutMs, params string[] args)
+    /// <summary>
+    /// Builds the <see cref="ProcessStartInfo"/> for one <c>winapp ui</c> child. The single place
+    /// the workflow id is stamped: every spawn in this harness routes through here, so the turn
+    /// continuity cannot be wired on one path and silently missing on another.
+    /// </summary>
+    internal static ProcessStartInfo CreateStartInfo(params string[] args)
     {
-        RecordInvocation();
-
         var psi = new ProcessStartInfo(WinAppExe)
         {
             UseShellExecute = false,
@@ -124,6 +568,112 @@ public sealed class WinAppUi
         };
         psi.ArgumentList.Add("ui");
         foreach (var a in args) psi.ArgumentList.Add(a);
+
+        // Stamp every child with this run's workflow id so the whole suite reads as one logical
+        // UI workflow to winapp's turn arbitration, rather than a few thousand anonymous one-shots
+        // that each drop the desktop the moment they exit.
+        psi.Environment[WorkflowIdEnvVar] = WorkflowId;
+
+        return psi;
+    }
+
+    private readonly record struct RunResult(int ExitCode, string StdOut, string StdErr);
+
+    /// <summary>
+    /// Runs one short-lived <c>winapp ui</c> child to completion under a timeout, draining both
+    /// output streams, and reports how it ended on
+    /// <see cref="BoundedRun.Outcome"/> — <see cref="BoundedRunOutcome.Completed"/>,
+    /// <see cref="BoundedRunOutcome.TimedOut"/>, or <see cref="BoundedRunOutcome.NotStarted"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>The static counterpart to <see cref="Run"/>, for the paths that must not throw: a
+    /// capability probe and a best-effort turn release both want "no answer" rather than an
+    /// exception. The outcome is reported rather than collapsed into a null result so those
+    /// callers can separate the two kinds of "no answer" — a killed child and a child that
+    /// exited normally with a code of <c>0</c> are not the same event, and
+    /// <see cref="BoundedRun.ExitCode"/> is only meaningful for
+    /// <see cref="BoundedRunOutcome.Completed"/>.</para>
+    /// <para>Draining asynchronously is the load-bearing part, not a tidiness preference.
+    /// <see cref="CreateStartInfo"/> redirects stdout *and* stderr, and a redirected stream that
+    /// nobody reads is a fixed-size pipe buffer the child blocks on once it fills. Reading one
+    /// stream to EOF first — which is what this replaced — deadlocks against the other, and
+    /// because that read precedes the timed wait, the timeout it was paired with could never
+    /// fire: a child that stopped producing stdout hung the probe for the whole job rather than
+    /// for <see cref="YieldTimeoutMs"/>.</para>
+    /// </remarks>
+    private static BoundedRun TryRunBounded(int timeoutMs, params string[] args)
+        => RunBounded(CreateStartInfo(args), timeoutMs);
+
+    /// <summary>Why a <see cref="BoundedRun"/> ended, so callers can tell "no" from "no answer".</summary>
+    internal enum BoundedRunOutcome
+    {
+        /// <summary>The child exited on its own inside the budget; <c>ExitCode</c> is meaningful.</summary>
+        Completed,
+
+        /// <summary>The child overran the budget and was killed. Nothing was established.</summary>
+        TimedOut,
+
+        /// <summary>No process was created, so there was nothing to wait for.</summary>
+        NotStarted,
+    }
+
+    internal readonly record struct BoundedRun(
+        BoundedRunOutcome Outcome, int ExitCode, string StdOut, string StdErr);
+
+    /// <summary>
+    /// Runs one child to completion under <paramref name="timeoutMs"/>, draining both redirected
+    /// streams throughout, and reports how it ended rather than collapsing every failure to null.
+    /// </summary>
+    /// <remarks>
+    /// Takes a <see cref="ProcessStartInfo"/> rather than winapp arguments so the draining and
+    /// the timeout — the two behaviours this exists for — can be regression-tested against a
+    /// child whose output volume and lifetime the test controls. A winapp cannot be made to flood
+    /// a pipe or hang on demand, so a test that could only go through <see cref="CreateStartInfo"/>
+    /// would be asserting against whatever the installed CLI happened to do.
+    /// </remarks>
+    internal static BoundedRun RunBounded(ProcessStartInfo psi, int timeoutMs)
+    {
+        using var proc = new Process { StartInfo = psi };
+
+        var sbOut = new StringBuilder();
+        var sbErr = new StringBuilder();
+        proc.OutputDataReceived += (_, e) => { if (e.Data != null) sbOut.AppendLine(e.Data); };
+        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) sbErr.AppendLine(e.Data); };
+
+        if (!proc.Start()) return new BoundedRun(BoundedRunOutcome.NotStarted, 0, "", "");
+
+        proc.BeginOutputReadLine();
+        proc.BeginErrorReadLine();
+
+        if (!proc.WaitForExit(timeoutMs))
+        {
+            TryKill(proc);
+
+            // Deliberately empty rather than the builders' current contents. WaitForExit(int)
+            // does not wait for the asynchronous output handlers to finish — only the
+            // parameterless overload does — so a child that emitted output before it hung can
+            // still be firing OutputDataReceived/ErrorDataReceived while these are read. No
+            // caller uses a timed-out run's output, so reporting none is both honest and
+            // race-free; the alternative is a torn read nobody consumes.
+            return new BoundedRun(BoundedRunOutcome.TimedOut, 0, "", "");
+        }
+
+        // Ensure async buffers are flushed.
+        proc.WaitForExit();
+
+        return new BoundedRun(
+            BoundedRunOutcome.Completed, proc.ExitCode, sbOut.ToString(), sbErr.ToString());
+    }
+
+    // Bumps the process-global spawn counter from a static scope, keeping the mutation off the
+    // instance Run path while still aggregating across the many short-lived WinAppUi instances.
+    private static void RecordInvocation() => Interlocked.Increment(ref InvocationCount);
+
+    private RunResult Run(int processTimeoutMs, params string[] args)
+    {
+        RecordInvocation();
+
+        var psi = CreateStartInfo(args);
 
         using var proc = new Process { StartInfo = psi };
         var sbOut = new StringBuilder();
@@ -146,7 +696,7 @@ public sealed class WinAppUi
 
         if (!proc.WaitForExit(processTimeoutMs))
         {
-            try { proc.Kill(true); } catch { }
+            TryKill(proc);
             throw new WinAppTimeoutException(
                 $"winapp ui {string.Join(' ', args)} did not exit within {processTimeoutMs}ms.");
         }
