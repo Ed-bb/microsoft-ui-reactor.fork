@@ -648,6 +648,17 @@ Conventions for contributors:
   `Cancel()` cleanup (PR #1124), that the source had been pooled and reset, was wrong: that crash
   was this same fault.
 
+- **Apps that reference Reactor no longer fail to build in deeply nested folders, and their
+  publish output now includes the app's `.pri` (issue #1271,
+  [WindowsAppSDK#6394](https://github.com/microsoft/WindowsAppSDK/issues/6394)).**
+  `Microsoft.UI.Reactor` now depends on `Microsoft.Windows.SDK.BuildTools.MSIX` 1.7.260930100,
+  which fixes both. If you copied the `_CopyWinUIResourcesForAot` target from
+  `docs/aot-support.md`, you can delete it.
+
+- **The `Microsoft.UI.Reactor` package has a single `lib/` folder and always contains
+  `ReactorApplication.xbf`.** A second `lib/` folder used to hold only that file, and packing
+  from a clean tree left it out.
+
 ### Security
 
 ## [0.1.0-preview.16] — 2026-09-22

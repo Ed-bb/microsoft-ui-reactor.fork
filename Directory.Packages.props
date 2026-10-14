@@ -28,6 +28,8 @@
     <PackageVersion Include="Microsoft.WindowsAppSDK" Version="$(WindowsAppSDKVersion)" />
     <PackageVersion Include="Microsoft.WindowsAppSDK.WinUI" Version="$(WindowsAppSDKWinUIVersion)" />
     <PackageVersion Include="Microsoft.WindowsAppSDK.Runtime" Version="$(WindowsAppSDKVersion)" />
+    <!-- Raised above what the Windows App SDK resolves; see src/Reactor/Reactor.csproj. -->
+    <PackageVersion Include="Microsoft.Windows.SDK.BuildTools.MSIX" Version="1.7.260930100" />
     <PackageVersion Include="Microsoft.Graphics.Win2D" Version="$(Win2DVersion)" />
   </ItemGroup>
 
