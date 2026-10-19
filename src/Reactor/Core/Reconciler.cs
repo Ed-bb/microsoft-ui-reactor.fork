@@ -929,27 +929,10 @@ public sealed partial class Reconciler : IDisposable
         public HashSet<string>? ManagedResourceKeys;
 
         /// <summary>
-        /// The factory output each <see cref="KeyedMemoElement"/> layer realized on this control
-        /// last, keyed by its <see cref="KeyedMemoElement.MemoKey"/>, so a resource-refresh pass
-        /// can diff a fresh output against what is mounted (<c>RefreshKeyedMemo</c>). Nested memos,
-        /// including ones separated by a transparent decorator such as a flyout's target, share
-        /// one control, so each layer keeps its own entry: the first inline, any others in
-        /// <see cref="MoreKeyedMemoOutputs"/>. Stored here, not in a table keyed by the managed
-        /// wrapper, for the same reason as <see cref="ManagedResourceKeys"/>. Cleared on pool
-        /// return; read only for a keyed memo's control, and guarded by <c>CanUpdate</c>.
-        /// </summary>
-        public object? KeyedMemoKey;
-
-        /// <summary>The output recorded for <see cref="KeyedMemoKey"/>.</summary>
-        public Element? KeyedMemoOutput;
-
-        /// <summary>Outputs of further memo layers sharing this control.</summary>
-        public List<KeyValuePair<object, Element>>? MoreKeyedMemoOutputs;
-
-        /// <summary>
-        /// For a templated <c>FlipView</c>: per logical item, the element it mounted or was last updated to and whether it realized a control,
-        /// so an update diffs against what is realized rather than a view rebuilt from the old
-        /// element (a rebuild re-resolves eagerly read theme brushes to their current values).
+        /// For a templated <c>FlipView</c>: per logical item, the element it mounted or was last
+        /// updated to and whether it realized a control. Updates diff against it (as a templated
+        /// ListView diffs against the element tagged on its container) and map logical items to
+        /// <c>Items</c> entries through it: an item whose view is Empty has no entry.
         /// </summary>
         public List<(Element Element, bool HasControl)>? MountedItemElements;
 
@@ -1291,9 +1274,9 @@ public sealed partial class Reconciler : IDisposable
     }
 
     /// <summary>
-    /// Drops the resource-refresh snapshots on a control (each keyed memo layer's recorded output,
-    /// a FlipView's mounted items, an ItemsHost's entry map). They hold element graphs and describe
-    /// one mount, so a control leaving the tree, to the pool or for good, must not keep them.
+    /// Drops the item records on a control (a FlipView's mounted items, an ItemsHost's entries).
+    /// They describe one mount, so a control leaving the tree, to the pool or for good, must not
+    /// keep them.
     /// </summary>
     internal static void ClearRefreshSnapshots(FrameworkElement fe)
     {
@@ -1303,9 +1286,6 @@ public sealed partial class Reconciler : IDisposable
 
     internal static void ClearRefreshSnapshots(ReactorState state)
     {
-        state.KeyedMemoKey = null;
-        state.KeyedMemoOutput = null;
-        state.MoreKeyedMemoOutputs = null;
         state.MountedItemElements = null;
         state.ItemsHostEntries = null;
     }
@@ -1361,8 +1341,7 @@ public sealed partial class Reconciler : IDisposable
         state.EchoSuppressScopeDepth = 0;
         state.PendingEchoMatch = null;
         state.PendingLabeledBy = null;
-        // The refresh snapshots can root an element graph (a keyed memo's realized output holds
-        // its callbacks and setters); a detached, app-held control must not keep it alive.
+        // Item maps describe the items this control showed; a detached control has none.
         ClearRefreshSnapshots(state);
         // Issue #1262 — a retired control must not keep a ValidationContext (or a
         // pending async rule) alive through a binding the normal FormField /
@@ -2275,8 +2254,6 @@ public sealed partial class Reconciler : IDisposable
             {
                 _forceFullRenderActive = false;
                 _resourceRefreshActive = false;
-                _freshForWrapperMount = null;
-                _freshMountFromDispatch = null;
                 _hotReloadRetryActive = false;
                 _dirtyAncestorPath?.Clear();
                 _dirtyPathChildren?.Clear();
@@ -3052,8 +3029,8 @@ public sealed partial class Reconciler : IDisposable
     private void UnmountRecursive(UIElement control)
     {
         NoteUnmountDuringSlotUpdate(control);
-        // Before any early exit: an unmounted control an app still holds must not keep the
-        // refresh snapshots' element graphs alive.
+        // Before any early exit: an unmounted control an app still holds must not keep a
+        // FlipView's mounted item elements alive.
         if (control is FrameworkElement snapshotFe) ClearRefreshSnapshots(snapshotFe);
 
         // Capture connected animation snapshot while element is still in the visual tree
@@ -3486,8 +3463,8 @@ public sealed partial class Reconciler : IDisposable
     private void UnmountAndCollect(UIElement control, List<FrameworkElement> toPool)
     {
         NoteUnmountDuringSlotUpdate(control);
-        // Before any early exit: an unmounted control an app still holds must not keep the
-        // refresh snapshots' element graphs alive.
+        // Before any early exit: an unmounted control an app still holds must not keep a
+        // FlipView's mounted item elements alive.
         if (control is FrameworkElement snapshotFe) ClearRefreshSnapshots(snapshotFe);
 
         // Capture connected animation snapshot while element is still in the visual tree
