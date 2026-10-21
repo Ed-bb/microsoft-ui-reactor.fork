@@ -60,6 +60,9 @@ public sealed class ReactorHost : IDisposable, Core.Diagnostics.IReactorDiagnost
     internal FrameworkElement? ThemeListenerElement => _themeListenerElement;
     private volatile bool _disposed;
 
+    // Set at the start of Dispose(), before component cleanups run.
+    internal bool IsDisposed => _disposed;
+
     // Set when the owning window has raised Closed — i.e. the native window is
     // being torn down. Drives BackdropApplier.Reset so it does NOT write
     // Window.SystemBackdrop on an already-destroyed window, which AVs
@@ -181,7 +184,11 @@ public sealed class ReactorHost : IDisposable, Core.Diagnostics.IReactorDiagnost
     public ReactorWindow? OwningWindow
     {
         get => Volatile.Read(ref _owningWindow);
-        internal set => Volatile.Write(ref _owningWindow, value);
+        internal set
+        {
+            Volatile.Write(ref _owningWindow, value);
+            _reconciler.OwningWindow = value;
+        }
     }
     private ReactorWindow? _owningWindow;
 
@@ -1003,7 +1010,7 @@ public sealed class ReactorHost : IDisposable, Core.Diagnostics.IReactorDiagnost
             // root and then throw, and the failure belongs to the component that threw.
             if (_rootComponent is { } renderingRoot)
             {
-                renderingRoot.Context.BeginRender(rerender);
+                renderingRoot.Context.BeginRender(rerender, OwningWindow);
                 try
                 {
                     using (ValidationRenderScope.Begin(null))
@@ -1038,7 +1045,7 @@ public sealed class ReactorHost : IDisposable, Core.Diagnostics.IReactorDiagnost
             }
             else if (_rootRenderFunc is not null && _funcContext is not null)
             {
-                _funcContext.BeginRender(rerender);
+                _funcContext.BeginRender(rerender, OwningWindow);
                 try
                 {
                     using (ValidationRenderScope.Begin(null))
