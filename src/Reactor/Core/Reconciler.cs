@@ -53,17 +53,16 @@ public sealed partial class Reconciler : IDisposable
     private readonly ContextScope _contextScope = new();
 
     /// <summary>
-    /// The <see cref="Microsoft.UI.Reactor.ReactorWindow"/> whose host owns this reconciler, or
-    /// null for hosts without one (<see cref="Microsoft.UI.Reactor.Hosting.ReactorHostControl"/>,
-    /// directly constructed hosts). Every component context it renders records it as its window
-    /// owner (read by the window hooks and the picker methods), including renders outside the
-    /// host's render pass (virtualized rows); TitleBar mount/update/unmount read it directly.
+    /// The host that owns this reconciler's content (<see cref="Microsoft.UI.Reactor.Hosting.ReactorHost"/>
+    /// or <see cref="Microsoft.UI.Reactor.Hosting.ReactorHostControl"/>), or null for a bare
+    /// reconciler (unit tests). Every component context it renders records it as its owner,
+    /// including renders outside the host's render pass (virtualized rows); the picker methods
+    /// resolve their owning window through it at call time.
     /// </summary>
-    internal Microsoft.UI.Reactor.ReactorWindow? OwningWindow { get; set; }
-
+    internal IContentOwner? Owner { get; set; }
     /// <summary>
     /// The XAML <see cref="Window"/> of the <see cref="Microsoft.UI.Reactor.Hosting.ReactorHost"/> that
-    /// owns this reconciler, with or without a <see cref="OwningWindow"/>; null for
+    /// owns this reconciler, with or without a <see cref="Microsoft.UI.Reactor.ReactorWindow"/> (<see cref="Owner"/>); null for
     /// <see cref="Microsoft.UI.Reactor.Hosting.ReactorHostControl"/>. Lets a mounting
     /// <c>TitleBar</c> claim its own host's window instead of whichever host is ambient.
     /// </summary>
@@ -81,7 +80,7 @@ public sealed partial class Reconciler : IDisposable
             WithdrawEmbeddedTitleBar(unmounting);
             return;
         }
-        if (OwningWindow is { IsClosingOrDisposed: false } window)
+        if (Owner?.ReactorWindow is { IsClosingOrDisposed: false } window)
             window.ClearTitleBarControl(unmounting);
     }
 
@@ -3131,7 +3130,7 @@ public sealed partial class Reconciler : IDisposable
                         receiver.SetProps(compEl.Props);
                     }
 
-                    node.Component.Context.BeginRender(componentRerender, _contextScope, OwningWindow);
+                    node.Component.Context.BeginRender(componentRerender, _contextScope, Owner);
                     using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
                     {
                         newChildElement = ValidationRenderScope.ApplyProvide(node.Component.Render());
@@ -3141,7 +3140,7 @@ public sealed partial class Reconciler : IDisposable
                 }
                 else if (node.Context is not null && newEl is FuncElement func)
                 {
-                    node.Context.BeginRender(componentRerender, _contextScope, OwningWindow);
+                    node.Context.BeginRender(componentRerender, _contextScope, Owner);
                     using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
                     {
                         newChildElement = ValidationRenderScope.ApplyProvide(func.RenderFunc(node.Context));
@@ -3151,7 +3150,7 @@ public sealed partial class Reconciler : IDisposable
                 }
                 else if (node.Context is not null && newEl is MemoElement memo)
                 {
-                    node.Context.BeginRender(componentRerender, _contextScope, OwningWindow);
+                    node.Context.BeginRender(componentRerender, _contextScope, Owner);
                     using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
                     {
                         newChildElement = ValidationRenderScope.ApplyProvide(memo.RenderFunc(node.Context));

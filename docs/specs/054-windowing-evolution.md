@@ -1137,17 +1137,32 @@ over the UWP `Windows.Storage.Pickers` + `InitializeWithWindow`, returning
   time. Pickers run from event handlers, outside render, where that field names
   the most recently rendered or constructed host (or null after any host is
   disposed). With two windows, A's picker parented to B, and every picker threw
-  once any window closed. Each host's `Reconciler` now carries its
-  `ReactorWindow` (`Reconciler.OwningWindow`, set when the window claims the host),
-  and every `BeginRender` records it on the `RenderContext`. The process-wide field
+  once any window closed. Each host's `Reconciler` then carried its
+  `ReactorWindow` (`Reconciler.OwningWindow`, set when the window claimed the host;
+  replaced by the owner resolver below), and every `BeginRender` recorded it on the
+  `RenderContext`. The process-wide field
   is not consulted, so a window opened mid-render or a virtualized row rendered
   outside the host's pass still records the right owner. The owner is cleared on
-  detach and a closed owner is refused. `ReactorHostControl` and directly
-  constructed hosts have no `ReactorWindow`, so the pickers throw there; callers
-  construct the native picker from `XamlRoot.ContentIslandEnvironment.AppWindowId`.
-  The window hooks (`UseWindow`, `UseDpi`, `UseWindowPosition`, …), `UsePersisted`'s
-  window scope and the `TitleBar` element read the same recorded owner during render
-  (issue #1396, spec 036 §7.1).
+  detach and a closed owner is refused.
+- **Embedded owners (issue #1395).** The reconciler carries an internal owner
+  resolver (`IContentOwner`, `Reconciler.Owner`) rather than a `ReactorWindow`, and
+  every `BeginRender` records it. Each host implements it: a `ReactorHost` resolves
+  the `Window` it was constructed over (`AppWindow.Id`), whether or not a
+  `ReactorWindow` claimed it, and refuses once the host is disposed, the window
+  closed, or the claiming `ReactorWindow` is closing. A `ReactorHostControl` resolves
+  `XamlRoot.ContentIslandEnvironment.AppWindowId` at call time, so a reparented
+  control follows its new window, and reports a distinct error while unloaded
+  (Unloaded does not unmount the tree, issue #344). Both check the host's dispatcher
+  thread first. The errors stay distinct: never rendered under a host, no longer
+  mounted, window closed or host disposed, control not loaded, wrong thread.
+- **Window hooks agree with the pickers (issue #1396).** The window hooks
+  (`UseWindow`, `UseDpi`, `UseWindowPosition`, …), `UsePersisted`'s window scope
+  and the `TitleBar` element read the same recorded owner during render
+  (`RenderContext.OwningReactorWindow` = `IContentOwner.ReactorWindow`; spec 036
+  §7.1). That is null for content with no `ReactorWindow` (tray flyout,
+  `ReactorHostControl`, a `ReactorHost` over a raw `Window`), with no fallback to
+  the process-wide host. The pickers differ only in resolving a window id from the
+  owner itself, so they work there too.
 - **Naming.** `HookRulesAnalyzer` treats any `Use[A-Z]*` method on
   `Component` / `RenderContext` as a hook, so calling the old names from a click
   lambda raised REACTOR_HOOKS_001 and from a named handler REACTOR_HOOKS_005. The

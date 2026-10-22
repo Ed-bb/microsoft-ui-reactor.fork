@@ -597,7 +597,8 @@ internal static class WindowHookOwnerFixtures
                 var ctx = new RenderContext();
                 int slots = -1;
                 Exception? failure = null;
-                foreach (var owner in new[] { null, a, null, a })
+                // The owner is the window's host (IContentOwner), whose ReactorWindow is a.
+                foreach (var owner in new IContentOwner?[] { null, a.Host, null, a.Host })
                 {
                     try
                     {

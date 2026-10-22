@@ -5246,7 +5246,7 @@ public partial record TitleBarElement(
             // repoints and which virtualized-row and ReactorHostControl renders never scope.
             .ImperativeBridged(
                 mount:  static (ctx, c, e) => global::Microsoft.UI.Reactor.Core.V1Protocol.TitleBarIconDefault.Apply(
-                    c, e, ctx.Reconciler.OwningWindow, force: true),
+                    c, e, ctx.Reconciler.Owner?.ReactorWindow, force: true),
                 update: static (ctx, c, _, e) => global::Microsoft.UI.Reactor.Core.V1Protocol.TitleBarIconDefault.Apply(
                     c, e, WindowFor(ctx.Reconciler, c), force: false))
             .ImperativeBridged(
@@ -5284,7 +5284,7 @@ public partial record TitleBarElement(
         // The XAML window of the ReactorHost whose reconciler mounts this control.
         if (reconciler.HostWindow is { } hostWindow)
         {
-            RegisterWithWindow(titleBar, element, hostWindow, reconciler.OwningWindow);
+            RegisterWithWindow(titleBar, element, hostWindow, reconciler.Owner?.ReactorWindow);
             return;
         }
 
@@ -5374,7 +5374,7 @@ public partial record TitleBarElement(
     internal static global::Microsoft.UI.Reactor.ReactorWindow? WindowFor(
         global::Microsoft.UI.Reactor.Core.Reconciler reconciler, WinUI.TitleBar titleBar)
     {
-        if (reconciler.HostWindow is not null) return reconciler.OwningWindow;
+        if (reconciler.HostWindow is not null) return reconciler.Owner?.ReactorWindow;
         return s_embedded.TryGetValue(titleBar, out var embedded) ? embedded.Window : null;
     }
 

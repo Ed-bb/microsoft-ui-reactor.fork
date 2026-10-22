@@ -897,7 +897,7 @@ public sealed partial class Reconciler
         bool inEffects = false;
         try
         {
-            component.Context.BeginRender(componentRerender, _contextScope, OwningWindow);
+            component.Context.BeginRender(componentRerender, _contextScope, Owner);
             using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
             {
                 childElement = ValidationRenderScope.ApplyProvide(component.Render());
@@ -982,7 +982,7 @@ public sealed partial class Reconciler
         bool inEffects = false;
         try
         {
-            ctx.BeginRender(componentRerender, _contextScope, OwningWindow);
+            ctx.BeginRender(componentRerender, _contextScope, Owner);
             using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
             {
                 childElement = ValidationRenderScope.ApplyProvide(funcElement.RenderFunc(ctx));
@@ -1066,7 +1066,7 @@ public sealed partial class Reconciler
         bool inEffects = false;
         try
         {
-            ctx.BeginRender(componentRerender, _contextScope, OwningWindow);
+            ctx.BeginRender(componentRerender, _contextScope, Owner);
             using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
             {
                 childElement = ValidationRenderScope.ApplyProvide(memoElement.RenderFunc(ctx));

@@ -664,9 +664,10 @@ taskbar progress, dispatch a window-level command, etc.). For
 behavior that should re-render on changes, use the targeted hooks:
 `UseWindowSize`, `UseDpi`, `UseWindowState`, `UseIsActive`.
 
-**How the window is resolved.** Each host's reconciler knows its
-`ReactorWindow` (`Reconciler.OwningWindow`) and records it on every
-`RenderContext` it renders, at each `BeginRender`. All window hooks
+**How the window is resolved.** Each host's reconciler carries an internal
+owner (`Reconciler.Owner`, the host itself; see spec 054 §8.3) and records it on
+every `RenderContext` it renders, at each `BeginRender`; the window hooks read the
+owner's `ReactorWindow`. All window hooks
 (`UseWindow`, parameterless `UseWindowSize`, `UseWindowPosition`,
 `UseIsCovered`, `UseWindowAspectRatio`, `UseWindowDragMove`,
 `UseWindowState`, `UseIsActive`, `UseClosingGuard`, `UseDpi`, and the

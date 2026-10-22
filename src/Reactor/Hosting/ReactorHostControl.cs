@@ -41,7 +41,7 @@ namespace Microsoft.UI.Reactor.Hosting;
 ///   - Error boundary with fallback UI
 ///   - Clean lifecycle via Loaded/Unloaded
 /// </summary>
-public sealed partial class ReactorHostControl : ContentControl, IDisposable, Core.Diagnostics.IReactorDiagnosticHost, IThemeResourceListener
+public sealed partial class ReactorHostControl : ContentControl, IDisposable, Core.Diagnostics.IReactorDiagnosticHost, IThemeResourceListener, IContentOwner
 {
 #pragma warning disable CS0414 // Design constant for render-loop limiting; wiring pending
     private static readonly int MaxRenderIterations = 50;
@@ -248,6 +248,7 @@ public sealed partial class ReactorHostControl : ContentControl, IDisposable, Co
         _reconciler.RenderErrorHandlerProvider = () => EffectiveRenderErrorHandler;
         _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
         _reconciler.OwningDispatcher = _dispatcherQueue;
+        _reconciler.Owner = this;
         // A standalone ReactorHostControl has no ReactorApp bootstrap, so nothing else
         // sets ReactorApp.UIDispatcher. Cross-thread setState — including the re-render
         // that UseValidationContext schedules when a background async validator raises
@@ -283,6 +284,24 @@ public sealed partial class ReactorHostControl : ContentControl, IDisposable, Co
     }
 
     Reconciler? Core.Diagnostics.IReactorDiagnosticHost.DiagnosticReconciler => _disposed ? null : _reconciler;
+
+    ReactorWindow? IContentOwner.ReactorWindow => null;
+
+    // Embedded content is owned by whichever top-level window the control is in when the call
+    // is made, so a reparent into another window follows it. Unloaded does not unmount the tree
+    // (issue #344), so a detached control is a call-time state rather than a released owner.
+    ContentOwnerStatus IContentOwner.TryGetWindowId(out WindowId id)
+    {
+        id = default;
+        if (_disposed)
+            return ContentOwnerStatus.Closed;
+        if (!_dispatcherQueue.HasThreadAccess)
+            return ContentOwnerStatus.WrongThread;
+        if (!IsLoaded || XamlRoot?.ContentIslandEnvironment is not { } environment)
+            return ContentOwnerStatus.Detached;
+        id = environment.AppWindowId;
+        return id.Value == 0 ? ContentOwnerStatus.Detached : ContentOwnerStatus.Available;
+    }
 
     Core.Diagnostics.ReactorHostInfo? Core.Diagnostics.IReactorDiagnosticHost.CaptureDiagnosticInfo()
     {
@@ -979,7 +998,7 @@ public sealed partial class ReactorHostControl : ContentControl, IDisposable, Co
             // root and then throw, and the failure belongs to the component that threw.
             if (_rootComponent is { } renderingRoot)
             {
-                renderingRoot.Context.BeginRender(_requestRenderAction ??= RequestRender);
+                renderingRoot.Context.BeginRender(_requestRenderAction ??= RequestRender, this);
                 try
                 {
                     using (ValidationRenderScope.Begin(null))
@@ -1013,7 +1032,7 @@ public sealed partial class ReactorHostControl : ContentControl, IDisposable, Co
             }
             else if (_rootRenderFunc is not null && _funcContext is not null)
             {
-                _funcContext.BeginRender(_requestRenderAction ??= RequestRender);
+                _funcContext.BeginRender(_requestRenderAction ??= RequestRender, this);
                 try
                 {
                     using (ValidationRenderScope.Begin(null))
