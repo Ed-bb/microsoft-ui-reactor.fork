@@ -102,6 +102,9 @@ a `.AutomationName(...)` modifier. The walk caps at the enclosing
 statement so a chain that wanders into another statement doesn't
 falsely satisfy the rule. The `HasModifierInChain` helper is the same
 shape every analyzer that needs to look at trailing modifiers uses.
+Only after those cheap syntactic filters does it ask the semantic model
+for the first argument's type: a `string`-typed label (a localized
+resource lookup, a variable) is a text button and needs no extra name.
 
 ## The current diagnostic set
 

@@ -374,6 +374,15 @@ Conventions for contributors:
 
 ### Fixed
 
+- **`REACTOR_A11Y_001` no longer flags text buttons with a non-literal string label**
+  (spec 006 §6.3). `Button(S("Usage_Refresh"), onClick)` — a localized resource lookup,
+  a `string` variable, or an interpolated string — was reported as an icon-only button
+  needing `.AutomationName(...)` because only string *literals* were recognised as text
+  content. The analyzer now also skips any first argument whose semantic type is (or
+  implicitly converts to) `string`; element/icon content still reports. Icon-glyph or
+  emoji *strings* remain the runtime `AccessibilityScanner` A11Y_001 check's job, as
+  string literals already were.
+
 - **`REACTOR_DSL_001` no longer asks for a key on a `Select` that projects values, not
   elements** (spec 042). A `Select` passed into a layout factory was flagged whatever it
   produced, so `Grid(days.Select(_ => GridSize.Star()).ToArray(), rows, …)`, which builds
