@@ -44,6 +44,12 @@ public sealed partial class Reconciler
         }
         // </snippet:mount-phase>
 
+        // A direct Mount from outside is an outermost frame for render-error propagation
+        // (issue #1291), like a top-level Reconcile; recursive mounts just count.
+        using var entryFrame = EnterFrame();
+        // Where this mount's completed roots start, while an ErrorBoundary records them.
+        int boundaryRootsStart = _boundaryMountRoots?.Count ?? -1;
+
         // Push context values onto scope before processing children
         var ctxValues = element.ContextValues;
         int ctxCount = 0;
@@ -63,6 +69,9 @@ public sealed partial class Reconciler
             ? ownTheme : prevAmbientTheme;
 
         UIElement? control;
+        // A per-host RegisterType callback may return the control it mounted for a child
+        // element; that control already describes the child (see ForwardsAnotherElement).
+        bool registeredType = false;
         // Push stagger scope if this element has StaggerConfig — children mounted
         // inside MountXxx will consume stagger indices for their enter transitions.
         bool pushedStagger = element.StaggerConfig is not null;
@@ -92,6 +101,7 @@ public sealed partial class Reconciler
         else if (_typeRegistry.TryGetValue(element.GetType(), out var reg))
         {
             control = reg.Mount(element, requestRerender, this);
+            registeredType = true;
         }
         else if (TryResolveFromControlRegistry(element.GetType(), out v1Entry))
         {
@@ -113,7 +123,7 @@ public sealed partial class Reconciler
             // factory output) when it changes, so the mounted inner is never re-derived from
             // the old factory. Any modifiers on the wrapper itself are applied by the
             // post-dispatch ApplyModifiers below, exactly like any other element.
-            KeyedMemoElement km => Mount(km.Factory() ?? EmptyElement.Instance, requestRerender),
+            KeyedMemoElement km => Mount(WithWrapperKey(km.Factory() ?? EmptyElement.Instance, km.Key), requestRerender),
             // EmptyElement is a no-op sentinel — callers (Reconcile, panel
             // children loops, ChildReconciler) already filter it before
             // reaching Mount, but MountContext.MountChild does not, so a V1
@@ -134,6 +144,9 @@ public sealed partial class Reconciler
             if (ReactorFeatureFlags.HighlightReconcileChanges
                 && _highlightMounted is not null)
                 _highlightMounted.Add(control);
+            if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+                && !(registeredType && ForwardsAnotherElement(control, element)))
+                PublishSource(control, element);
         }
 
         // Issue #345 — one-time debug warning for HStack/VStack collapsing to 0×0 inside a
@@ -173,7 +186,7 @@ public sealed partial class Reconciler
         if (control is WinUI.TitleBar tbCtl)
         {
             if (element is TitleBarElement tbEl)
-                TitleBarElement.SyncControlHeightAfterModifiers(tbCtl, tbEl);
+                TitleBarElement.SyncControlHeightAfterModifiers(tbCtl, tbEl, TitleBarElement.WindowFor(this, tbCtl));
 
             // Anything that changed since the pre-modifier observation came from a
             // modifier; whether it recurs depends on the phase.
@@ -245,8 +258,31 @@ public sealed partial class Reconciler
             _ambientRequestedTheme = prevAmbientTheme;
         }
 
+        NoteMountCompleted(boundaryRootsStart, control);
         return control;
     }
+
+    /// <summary>
+    /// Gives the factory output of a transparent <see cref="KeyedMemoElement"/> the wrapper's
+    /// <see cref="Element.Key"/>.
+    /// </summary>
+    /// <remarks>
+    /// The wrapper mounts no control of its own, so the inner control stands for it in the
+    /// parent's child list while carrying the inner element's tag.
+    /// <c>ChildReconciler.ReconcileKeyedMiddle</c> finds each surviving child by the key on
+    /// that tag. Without the wrapper's key there, a keyed <c>Memo(key, …)</c> survivor is never
+    /// found, so it stays unpatched at its old index while its siblings are placed around it,
+    /// and a Grid parent then gives it another child's row and column.
+    /// <para>The wrapper's key replaces an explicit key on the inner element. The parent diffs
+    /// on the wrapper's key, and the inner element is never diffed against a different one: an
+    /// unchanged <see cref="KeyedMemoElement.MemoKey"/> skips it (or, when a component inside it
+    /// updated its own state, walks a fresh factory output against itself to reach that
+    /// component), and a changed one remounts it.</para>
+    /// </remarks>
+    private static Element WithWrapperKey(Element inner, string? wrapperKey) =>
+        wrapperKey is null || inner is EmptyElement || inner.Key == wrapperKey
+            ? inner
+            : inner with { Key = wrapperKey };
 
     /// <summary>
     /// Final dispatch arm: the four resolution arms in <see cref="Mount"/>
@@ -462,6 +498,8 @@ public sealed partial class Reconciler
     // true the header becomes a StackPanel { TextBlock(title) , pin Button };
     // otherwise the existing string header path is preserved verbatim so
     // tabs without pin affordance are visually identical to baseline.
+    // A composite header costs the tab its accessible name (see
+    // SyncTabAutomationName), so callers pair the two.
     internal static object BuildTabHeader(TabViewItemData tabItem)
     {
         if (!tabItem.IsPinnable) return tabItem.Header;
@@ -478,6 +516,33 @@ public sealed partial class Reconciler
         sp.Children.Add(text);
         sp.Children.Add(BuildPinButton(tabItem));
         return sp;
+    }
+
+    /// <summary>
+    /// Keeps a tab's UI Automation name equal to its title. WinUI's
+    /// <c>TabViewItem</c> automation peer derives a Name only from a string
+    /// <c>Header</c>, so the composite header <see cref="BuildTabHeader"/>
+    /// builds for a pinnable tab would otherwise leave the tab unnamed for
+    /// assistive technology. The title is mirrored onto
+    /// <c>AutomationProperties.Name</c> while the header is composite, and
+    /// the local value is released once the tab reverts to a plain string
+    /// header, from which WinUI derives the name itself. Pass
+    /// <paramref name="oldTab"/> as null for a freshly created container.
+    /// </summary>
+    internal static void SyncTabAutomationName(
+        WinUI.TabViewItem tabViewItem,
+        TabViewItemData? oldTab,
+        TabViewItemData newTab)
+    {
+        if (newTab.IsPinnable)
+        {
+            if (oldTab is not { IsPinnable: true } || oldTab.Header != newTab.Header)
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(tabViewItem, newTab.Header);
+        }
+        else if (oldTab is { IsPinnable: true })
+        {
+            tabViewItem.ClearValue(Microsoft.UI.Xaml.Automation.AutomationProperties.NameProperty);
+        }
     }
 
     /// <summary>
@@ -632,12 +697,7 @@ public sealed partial class Reconciler
             // previous row before WinUI hands the container to a new one.
             PropagateItemAutomationName(args.ItemContainer, null);
             if (args.ItemContainer.ContentTemplateRoot is ContentControl oldCc)
-            {
-                if (oldCc.Content is UIElement oldCtrl)
-                    UnmountChild(oldCtrl);
-                oldCc.Content = null;
-                ClearElementTag(oldCc);
-            }
+                UnmountItemView(oldCc, clearContent: true);
             return;
         }
 
@@ -651,8 +711,12 @@ public sealed partial class Reconciler
         if (viewSource is not null && args.ItemIndex >= 0 && args.ItemIndex < viewSource.ItemCount
             && args.ItemContainer.ContentTemplateRoot is ContentControl cc)
         {
-            var itemElement = viewSource.BuildItemView(args.ItemIndex);
+            // WinUI can re-realize a container without first raising the recycle event
+            // for its previous row; unmount that row's view or its components leak.
+            UnmountItemView(cc, clearContent: false);
+            var itemElement = BuildKeyedItemView(viewSource, args.ItemIndex);
             var ctrl = Mount(itemElement, requestRerender);
+            EnsureItemIdentity(ctrl, itemElement);
             cc.Content = ctrl;
             SetElementTag(cc, itemElement); // Store for later reconciliation
 
@@ -671,6 +735,23 @@ public sealed partial class Reconciler
         }
     }
 
+    /// <summary>
+    /// Unmounts the item view a templated items control's container hosts. The container's
+    /// element tag marks the view as live: an orphan sweep
+    /// (<see cref="RefreshRealizedContainers"/>) unmounts a view but leaves its visuals in
+    /// place for a delete transition, and clears the tag so no path unmounts it twice.
+    /// </summary>
+    internal void UnmountItemView(ContentControl cc, bool clearContent)
+    {
+        if (GetElementTag(cc) is not null)
+        {
+            if (cc.Content is UIElement view)
+                UnmountChild(view);
+            ClearElementTag(cc);
+        }
+        if (clearContent)
+            cc.Content = null;
+    }
     /// <summary>
     /// Issue #951 — forwards an author-declared automation name from the item
     /// view's root onto its generated <c>ListViewItem</c> / <c>GridViewItem</c>.
@@ -748,22 +829,39 @@ public sealed partial class Reconciler
         Element renderedElement;
         Exception? caughtEx = null;
 
+        var record = BeginBoundaryMount();
+        // Whether the wrapper ended up with a child (the real one or the fallback); only a
+        // mount that escapes before then leaves something to discard in the finally.
+        bool settled = false;
         _errorBoundaryDepth++;
         try
         {
             renderedElement = eb.Child;
             wrapper.Child = Mount(eb.Child, requestRerender);
+            settled = true;
         }
-        catch (Exception ex)
+        // An exception the app declined via RenderError.Propagate() is on its way out (issue
+        // #1291); no boundary, including the internal guard around an app fallback, takes it.
+        catch (Exception ex) when (!RenderErrorDispatch.IsPropagating(ex))
         {
             _logger?.LogWarning(ex, "ErrorBoundary caught render error");
             caughtEx = ex;
+            // The partly mounted child is discarded: run its effect cleanups now (issue
+            // #1291), then mount the fallback under the enclosing record.
+            _boundaryMountJournal = record.OuterJournal;
+            RollBackBoundaryMount(record, attachedChild: null);
             renderedElement = eb.Fallback(ex);
             wrapper.Child = Mount(renderedElement, requestRerender);
+            settled = true;
         }
         finally
         {
             _errorBoundaryDepth--;
+            // An exception escaping the boundary (a declined propagation, or a failing
+            // fallback) discards what it left as well. Best effort: the escaping exception wins.
+            if (!settled && HasBoundaryMountLeftovers(record))
+                RollBackDiscardedBoundaryMount(record, attachedChild: null);
+            EndBoundaryMount(record);
         }
 
         _errorBoundaryNodes[wrapper] = new ErrorBoundaryNode
@@ -773,6 +871,7 @@ public sealed partial class Reconciler
             CaughtException = caughtEx,
             Fallback = eb.Fallback,
         };
+        _boundaryMountJournal?.Add(wrapper);
 
         // Spec 010 — composition wrappers carry the DSL call site too. Without this
         // an intercepted ErrorBoundary(...) has a non-null Element.CallSite that
@@ -800,29 +899,75 @@ public sealed partial class Reconciler
             PreviousProps = compElement.Props,
         };
         _componentNodes[wrapper] = node;
+        _boundaryMountJournal?.Add(wrapper);
 
         // Pass the component's own wrapped rerender to children so that child state
         // changes propagate SelfTriggered up through all component ancestors.
         var componentRerender = CreateComponentRerender(node, requestRerender);
 
+        bool traceRendered = Diagnostics.ComponentRenderTrace.IsEnabled;
+        long renderedStart = traceRendered ? global::System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
+        bool renderReported = false;
         Element childElement;
+        bool inEffects = false;
         try
         {
-            component.Context.BeginRender(componentRerender, _contextScope);
+            component.Context.BeginRender(componentRerender, _contextScope, Owner);
             using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
             {
                 childElement = ValidationRenderScope.ApplyProvide(component.Render());
             }
+            inEffects = true;
             component.Context.FlushEffects();
         }
-        catch (Exception ex) when (_errorBoundaryDepth == 0 && ex is not OutOfMemoryException and not StackOverflowException)
+        // Inside an ErrorBoundary — or a fatal exception the fallback arm below won't take:
+        // name the failing component, then rethrow unchanged (see ReconcileComponent). An
+        // exception the app declined via RenderError.Propagate() was already reported where
+        // it was thrown, so it passes through unreported (issue #1291).
+        catch (Exception ex) when ((_errorBoundaryDepth > 0 || ex is OutOfMemoryException or StackOverflowException)
+            && !RenderErrorDispatch.IsPropagating(ex))
         {
-            _logger?.LogError(ex, "Component Render() threw during mount: {ComponentName}", compElement.GetType().Name);
-            childElement = ErrorFallback.BuildElement(ex);
+            // The render still happened: report it, as the trailing arm does for the rest.
+            if (traceRendered)
+                EmitComponentRendered(node, null, compElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+            EmitRenderError(Diagnostics.ComponentNames.For(component, compElement), ex);
+            throw;
         }
-        UIElement? childControl = Mount(childElement, componentRerender);
+        catch (Exception ex) when (_errorBoundaryDepth == 0 && ex is not OutOfMemoryException and not StackOverflowException && !RenderErrorDispatch.IsPropagating(ex))
+        {
+            // Report before building the fallback: its time is not this render's, and a
+            // fallback that throws must not swallow the event.
+            if (traceRendered)
+            {
+                EmitComponentRendered(node, null, compElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+                renderReported = true;
+            }
+            var failedName = Diagnostics.ComponentNames.For(component, compElement);
+            _logger?.LogError(ex, "Component Render() threw during mount: {ComponentName}", failedName);
+            // Before the fallback: the app's handler may call Propagate(), which throws.
+            EmitRenderError(failedName, ex);
+            childElement = BuildInTreeFallback(ex, inEffects, component.GetType().Name);
+        }
+        // Every other exception propagates (to an enclosing ErrorBoundary, or a fatal one
+        // to the host); the render still happened, so report it (the wrapper is
+        // discarded, so no registry entry) and rethrow.
+        catch (Exception) when (traceRendered)
+        {
+            EmitComponentRendered(node, null, compElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+            throw;
+        }
+        if (traceRendered && !renderReported)
+            EmitComponentRendered(node, null, compElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+        UIElement? childControl = global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+            ? MountUnderOwner(childElement, componentRerender, Diagnostics.ReactorSourceFormat.ComponentName(component, compElement))
+            : Mount(childElement, componentRerender);
 
         wrapper.Child = childControl;
+        // Map the id only once the subtree has mounted: a descendant that throws into an
+        // enclosing ErrorBoundary discards this wrapper without unmounting it.
+        if (traceRendered)
+            TrackMountedComponent(node, wrapper);
         node.RenderedElement = childElement;
         // Spec 010 - see MountErrorBoundary: the wrapper is the realized control an
         // inspector hits, so it has to carry the call site. Free when unstamped.
@@ -839,29 +984,73 @@ public sealed partial class Reconciler
             Context = ctx, RenderedElement = null, Element = funcElement,
         };
         _componentNodes[wrapper] = node;
+        _boundaryMountJournal?.Add(wrapper);
 
         // Pass the component's own wrapped rerender to children so that child state
         // changes propagate SelfTriggered up through all component ancestors.
         var componentRerender = CreateComponentRerender(node, requestRerender);
 
+        bool traceRendered = Diagnostics.ComponentRenderTrace.IsEnabled;
+        long renderedStart = traceRendered ? global::System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
+        bool renderReported = false;
         Element childElement;
+        bool inEffects = false;
         try
         {
-            ctx.BeginRender(componentRerender, _contextScope);
+            ctx.BeginRender(componentRerender, _contextScope, Owner);
             using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
             {
                 childElement = ValidationRenderScope.ApplyProvide(funcElement.RenderFunc(ctx));
             }
+            inEffects = true;
             ctx.FlushEffects();
         }
-        catch (Exception ex) when (_errorBoundaryDepth == 0 && ex is not OutOfMemoryException and not StackOverflowException)
+        // Inside an ErrorBoundary — or a fatal exception the fallback arm below won't take:
+        // name the failing component, then rethrow unchanged (see ReconcileComponent). An
+        // exception the app declined via RenderError.Propagate() was already reported where
+        // it was thrown, so it passes through unreported (issue #1291).
+        catch (Exception ex) when ((_errorBoundaryDepth > 0 || ex is OutOfMemoryException or StackOverflowException)
+            && !RenderErrorDispatch.IsPropagating(ex))
         {
-            _logger?.LogError(ex, "FuncComponent Render() threw during mount");
-            childElement = ErrorFallback.BuildElement(ex);
+            if (traceRendered)
+                EmitComponentRendered(node, null, funcElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+            EmitRenderError(Diagnostics.ComponentNames.For(null, funcElement), ex);
+            throw;
         }
-        UIElement? childControl = Mount(childElement, componentRerender);
+        catch (Exception ex) when (_errorBoundaryDepth == 0 && ex is not OutOfMemoryException and not StackOverflowException && !RenderErrorDispatch.IsPropagating(ex))
+        {
+            // Report before building the fallback: its time is not this render's, and a
+            // fallback that throws must not swallow the event.
+            if (traceRendered)
+            {
+                EmitComponentRendered(node, null, funcElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+                renderReported = true;
+            }
+            _logger?.LogError(ex, "FuncComponent Render() threw during mount");
+            // Before the fallback: the app's handler may call Propagate(), which throws.
+            EmitRenderError(Diagnostics.ComponentNames.For(null, funcElement), ex);
+            childElement = BuildInTreeFallback(ex, inEffects, componentName: null);
+        }
+        // Every other exception propagates (to an enclosing ErrorBoundary, or a fatal one
+        // to the host); the render still happened, so report it (the wrapper is
+        // discarded, so no registry entry) and rethrow.
+        catch (Exception) when (traceRendered)
+        {
+            EmitComponentRendered(node, null, funcElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+            throw;
+        }
+        if (traceRendered && !renderReported)
+            EmitComponentRendered(node, null, funcElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+        UIElement? childControl = global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+            ? MountUnderOwner(childElement, componentRerender, nameof(FuncElement))
+            : Mount(childElement, componentRerender);
 
         wrapper.Child = childControl;
+        // Map the id only once the subtree has mounted: a descendant that throws into an
+        // enclosing ErrorBoundary discards this wrapper without unmounting it.
+        if (traceRendered)
+            TrackMountedComponent(node, wrapper);
         node.RenderedElement = childElement;
         // Spec 010 - see MountErrorBoundary: the wrapper is the realized control an
         // inspector hits, so it has to carry the call site. Free when unstamped.
@@ -879,29 +1068,73 @@ public sealed partial class Reconciler
             MemoDependencies = memoElement.Dependencies,
         };
         _componentNodes[wrapper] = node;
+        _boundaryMountJournal?.Add(wrapper);
 
         // Pass the component's own wrapped rerender to children so that child state
         // changes propagate SelfTriggered up through all component ancestors.
         var componentRerender = CreateComponentRerender(node, requestRerender);
 
+        bool traceRendered = Diagnostics.ComponentRenderTrace.IsEnabled;
+        long renderedStart = traceRendered ? global::System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
+        bool renderReported = false;
         Element childElement;
+        bool inEffects = false;
         try
         {
-            ctx.BeginRender(componentRerender, _contextScope);
+            ctx.BeginRender(componentRerender, _contextScope, Owner);
             using (ValidationRenderScope.Begin(ReadContext(ValidationContexts.Current)))
             {
                 childElement = ValidationRenderScope.ApplyProvide(memoElement.RenderFunc(ctx));
             }
+            inEffects = true;
             ctx.FlushEffects();
         }
-        catch (Exception ex) when (_errorBoundaryDepth == 0 && ex is not OutOfMemoryException and not StackOverflowException)
+        // Inside an ErrorBoundary — or a fatal exception the fallback arm below won't take:
+        // name the failing component, then rethrow unchanged (see ReconcileComponent). An
+        // exception the app declined via RenderError.Propagate() was already reported where
+        // it was thrown, so it passes through unreported (issue #1291).
+        catch (Exception ex) when ((_errorBoundaryDepth > 0 || ex is OutOfMemoryException or StackOverflowException)
+            && !RenderErrorDispatch.IsPropagating(ex))
         {
-            _logger?.LogError(ex, "MemoComponent Render() threw during mount");
-            childElement = ErrorFallback.BuildElement(ex);
+            if (traceRendered)
+                EmitComponentRendered(node, null, memoElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+            EmitRenderError(Diagnostics.ComponentNames.For(null, memoElement), ex);
+            throw;
         }
-        UIElement? childControl = Mount(childElement, componentRerender);
+        catch (Exception ex) when (_errorBoundaryDepth == 0 && ex is not OutOfMemoryException and not StackOverflowException && !RenderErrorDispatch.IsPropagating(ex))
+        {
+            // Report before building the fallback: its time is not this render's, and a
+            // fallback that throws must not swallow the event.
+            if (traceRendered)
+            {
+                EmitComponentRendered(node, null, memoElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+                renderReported = true;
+            }
+            _logger?.LogError(ex, "MemoComponent Render() threw during mount");
+            // Before the fallback: the app's handler may call Propagate(), which throws.
+            EmitRenderError(Diagnostics.ComponentNames.For(null, memoElement), ex);
+            childElement = BuildInTreeFallback(ex, inEffects, componentName: null);
+        }
+        // Every other exception propagates (to an enclosing ErrorBoundary, or a fatal one
+        // to the host); the render still happened, so report it (the wrapper is
+        // discarded, so no registry entry) and rethrow.
+        catch (Exception) when (traceRendered)
+        {
+            EmitComponentRendered(node, null, memoElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+            throw;
+        }
+        if (traceRendered && !renderReported)
+            EmitComponentRendered(node, null, memoElement, Diagnostics.ComponentRenderTrace.Reasons.Mount, renderedStart);
+        UIElement? childControl = global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+            ? MountUnderOwner(childElement, componentRerender, nameof(MemoElement))
+            : Mount(childElement, componentRerender);
 
         wrapper.Child = childControl;
+        // Map the id only once the subtree has mounted: a descendant that throws into an
+        // enclosing ErrorBoundary discards this wrapper without unmounting it.
+        if (traceRendered)
+            TrackMountedComponent(node, wrapper);
         node.RenderedElement = childElement;
         // Spec 010 - see MountErrorBoundary: the wrapper is the realized control an
         // inspector hits, so it has to carry the call site. Free when unstamped.

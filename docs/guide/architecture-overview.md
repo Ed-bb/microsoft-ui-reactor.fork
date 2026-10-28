@@ -194,6 +194,8 @@ public UIElement GetElement(ElementFactoryGetArgs args)
                 // location follows the row that is actually live (spec 010).
                 if (reused is FrameworkElement adoptedFe)
                     Reconciler.SetElementTagIfNeeded(adoptedFe, element);
+                if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled)
+                    Reconciler.AdoptPublishedSource(reused, replacement);
             }
             else
             {
@@ -256,7 +258,10 @@ public UIElement? Reconcile(
     UIElement? existingControl,
     Action requestRerender)
 {
-    // Declared first so it is disposed last: validation changes raised by mount,
+    // A top-level pass is an outermost Reactor frame for render-error propagation
+    // (issue #1291); see EnterFrame. Nested passes and mounts just count.
+    using var entryFrame = EnterFrame();
+    // Declared before the reconcile work so it is disposed after it: validation changes raised by mount,
     // update, or unmount are announced only once the whole pass has finished.
     using var validationScope = Controls.Validation.ValidationRenderScope.BeginReconcile();
     ReferenceDirtySet.BeginCommit();
@@ -298,10 +303,15 @@ public UIElement? Reconcile(
             (_highlightMounted ??= new()).Clear();
             (_highlightModified ??= new()).Clear();
         }
-        // Consume the hot-reload signal exactly once per top-level pass so
-        // every component re-runs Render() even when props/deps are unchanged.
-        _forceFullRenderActive = ForceFullRenderPending;
+        // Consume the hot-reload and resource-refresh signals exactly once per
+        // top-level pass so every component re-runs Render() even when props/deps
+        // are unchanged (and, for a resource refresh, no element is skipped).
+        _resourceRefreshActive = _resourceRefreshArmed;
+        _resourceRefreshArmed = false;
+        _forceFullRenderActive = ForceFullRenderPending || _resourceRefreshActive;
         ForceFullRenderPending = false;
+        _hotReloadRetryActive = HotReloadRetryPending;
+        HotReloadRetryPending = false;
 
         // Build the dirty-ancestor path. For every component node
         // whose SelfTriggered is true, walk up the realized visual

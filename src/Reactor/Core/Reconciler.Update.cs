@@ -115,7 +115,10 @@ public sealed partial class Reconciler
             if (newEl.HasCallbacks && control is FrameworkElement tagFeSE)
                 SetElementTag(tagFeSE, newEl);
             else if (CallSiteChangedOnSkip(oldEl, newEl) && control is FrameworkElement srcFeSE)
-                SetElementTag(srcFeSE, newEl);   // spec 010 — keep the reported line live
+                RefreshCallSiteTagOnSkip(srcFeSE, newEl);   // spec 010 — keep the reported line live
+            if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+                && CallSiteChangedOnSkip(oldEl, newEl))
+                PublishSourceOnSkip(control, newEl);
             if (newEl.ThemeBindings is not null && control is FrameworkElement thFeSE)
                 ApplyThemeBindings(thFeSE, newEl.ThemeBindings);
             // Re-resolve ThemeRef-based resource overrides on theme change, against the
@@ -177,6 +180,7 @@ public sealed partial class Reconciler
         }
 
         UIElement? result;
+        bool registeredType = false;
         try
         {
         // Publish the effective theme for the subtree now that we're committed to the
@@ -205,6 +209,7 @@ public sealed partial class Reconciler
         else if (_typeRegistry.TryGetValue(newEl.GetType(), out var reg))
         {
             result = reg.Update(oldEl, newEl, control, requestRerender, this);
+            registeredType = true;
         }
         else if (TryResolveFromControlRegistry(newEl.GetType(), out v1Entry))
         {
@@ -233,15 +238,40 @@ public sealed partial class Reconciler
             // time to reconstruct the old tree (which would diff against the wrong "old" if the
             // factory reads mutable state by reference). Wrapper modifiers are still applied by
             // the post-dispatch ApplyModifiers below.
+            // The exceptions are a component inside the subtree that updated its own state, and
+            // a resource-refresh pass (Theme.NotifyResourcesChanged), which must reach every
+            // Theme.Ref value inside: returning null would leave them stale, so the pass walks the
+            // subtree instead.
+            (KeyedMemoElement, KeyedMemoElement memo, _) when _resourceRefreshActive || IsOnDirtyAncestorPath(control)
+                => UpdateKeyedMemoTowardDirtyDescendant(memo, control, requestRerender),
             (KeyedMemoElement, KeyedMemoElement, _) => null,
             _ => Mount(newEl, requestRerender),
         };
         }
 
+        // A transparent layer (a keyed Memo, a flyout wrapping its target) shares its inner
+        // element's control. When the inner update hands back a different control (a target whose
+        // type changed, a handler that always remounts), that control is new to this layer too, so
+        // its own modifiers apply with mount semantics (all written, OnMount runs) rather than as an
+        // old->new diff. Nested layers each see the same different control and do the same.
+        if (result is not null && !ReferenceEquals(result, control)
+            && newEl is KeyedMemoElement or FlyoutElement or MenuFlyoutElement or CommandBarFlyoutElement)
+            oldModifiers = null;
+
         // Apply inline modifiers after update. When old modifiers existed but new
         // modifiers are null, pass an empty instance so ApplyModifiers can clear
         // stale values (same principle as the flex attached-property fix).
         var target = result ?? control;
+        // Re-publish only when the value can change: a replaced control (its mount already
+        // published, but a handler may have swapped it without Mount) or a new call site /
+        // key / kind. An in-place update of an unchanged element keeps its published value.
+        if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+            && (result is not null || Diagnostics.ReactorSourcePublisher.IdentityChanged(oldEl, newEl))
+            // A RegisterType callback that forwards to a child: the control describes the child
+            // (compared with the element whose value it would carry: the new one for a
+            // replacement, the old one for an in-place update).
+            && !(registeredType && ForwardsAnotherElement(target, result is not null ? newEl : oldEl)))
+            PublishSource(target, newEl);
 
         // Record the control for highlight overlay only when the element's own
         // WinUI properties were actually updated (not just children recursed).
@@ -282,7 +312,7 @@ public sealed partial class Reconciler
         if (target is WinUI.TitleBar tbCtl)
         {
             if (newEl is TitleBarElement tbEl)
-                TitleBarElement.SyncControlHeightAfterModifiers(tbCtl, tbEl);
+                TitleBarElement.SyncControlHeightAfterModifiers(tbCtl, tbEl, TitleBarElement.WindowFor(this, tbCtl));
 
             // Anything that changed since the pre-modifier observation came from a
             // modifier; whether it recurs depends on the phase.
@@ -459,6 +489,34 @@ public sealed partial class Reconciler
         {
             if (block is Microsoft.UI.Xaml.Documents.Paragraph para)
                 UnmountInlineUIChildrenInInlines(para.Inlines);
+        }
+    }
+
+    /// <summary>
+    /// Visits the Reactor-managed (Route A) inline UI children of a
+    /// <see cref="WinUI.RichTextBlock"/>: the same set <see cref="UnmountInlineUIChildren"/>
+    /// tears down, which a logical walk must reach before the document is realized.
+    /// </summary>
+    internal static void VisitInlineUIChildren(WinUI.RichTextBlock rtb, Action<UIElement> visit)
+    {
+        foreach (var para in global::System.Linq.Enumerable.OfType<Microsoft.UI.Xaml.Documents.Paragraph>(rtb.Blocks))
+            VisitInlineUIChildrenInInlines(para.Inlines, visit);
+    }
+
+    private static void VisitInlineUIChildrenInInlines(
+        Microsoft.UI.Xaml.Documents.InlineCollection inlines, Action<UIElement> visit)
+    {
+        foreach (var inline in inlines)
+        {
+            switch (inline)
+            {
+                case WinDocs.InlineUIContainer { Child: FrameworkElement childFe } when (bool)childFe.GetValue(s_inlineUIRouteAProperty):
+                    visit(childFe);
+                    break;
+                case WinDocs.Span span:
+                    VisitInlineUIChildrenInInlines(span.Inlines, visit);
+                    break;
+            }
         }
     }
 
@@ -1171,7 +1229,7 @@ public sealed partial class Reconciler
         if (newChild is not null && oldChild is not null
             && getControl() is UIElement existing && CanUpdate(oldChild, newChild))
         {
-            var replacement = Update(oldChild, newChild, existing, requestRerender);
+            var replacement = UpdateHostedChild(oldChild, newChild, existing, requestRerender);
             if (replacement is not null) setControl(replacement);
         }
         else if (newChild is not null)
@@ -1221,23 +1279,27 @@ public sealed partial class Reconciler
             if (container.ContentTemplateRoot is not ContentControl cc) continue;
 
             var index = listViewBase.IndexFromContainer(container);
-            if (index < 0 || index >= viewSource.ItemCount) continue;
+            if (index < 0)
+            {
+                UnmountOrphanedContainer(listViewBase, container, cc);
+                continue;
+            }
+            if (index >= viewSource.ItemCount) continue;
 
             var oldItemElement = GetElementTag(cc);
-            var newItemElement = viewSource.BuildItemView(index);
+            var newItemElement = BuildKeyedItemView(viewSource, index);
 
-            if (oldItemElement is not null && cc.Content is UIElement existingCtrl && CanUpdate(oldItemElement, newItemElement))
-            {
-                var replacement = Update(oldItemElement, newItemElement, existingCtrl, requestRerender);
-                if (replacement is not null && !ReferenceEquals(cc.Content, replacement))
-                    cc.Content = replacement;
-            }
-            else
-            {
-                if (cc.Content is UIElement oldCtrl)
-                    Unmount(oldCtrl);
-                cc.Content = Mount(newItemElement, requestRerender);
-            }
+            // ReconcileV1Child updates in place when it can and remounts otherwise, and either way
+            // unmounts a control it replaced (e.g. a same-key Memo whose output changed shape
+            // during a resource refresh), so the old item's effects and refs are cleaned up.
+            // Untagged content was already unmounted by the orphan sweep: replace it, never
+            // unmount it again.
+            var priorKey = cc.Content is FrameworkElement priorFe ? GetElementTag(priorFe)?.Key : null;
+            var next = ReconcileV1Child(oldItemElement, newItemElement,
+                oldItemElement is null ? null : cc.Content as UIElement, requestRerender);
+            EnsureItemIdentity(next, newItemElement, priorKey, updated: true);
+            if (!ReferenceEquals(cc.Content, next))
+                cc.Content = next;
             SetElementTag(cc, newItemElement);
 
             // Issue #951 — the container survives re-renders, so its automation
@@ -1245,6 +1307,32 @@ public sealed partial class Reconciler
             // a renamed item would keep announcing the previous row's name.
             PropagateItemAutomationName(container, cc.Content as UIElement);
         }
+    }
+
+    /// <summary>
+    /// Unmounts the item view of a container WinUI has unlinked from its item
+    /// (<c>IndexFromContainer</c> is -1) once that view's row is gone: removed from the list,
+    /// or shown by another container. WinUI normally raises a recycle
+    /// <c>ContainerContentChanging</c> for such a container, but under rapid insert / remove
+    /// churn it can park one offscreen in the items panel without ever doing so, which left the
+    /// row's components mounted: effects never cleaned up and diagnostics writes were accepted
+    /// but never rendered. Only the components are torn down — the visuals stay, so a delete
+    /// transition still fades the row out. A container unlinked for a row still in the list and
+    /// owned by no other container keeps its view: defensively, in case WinUI relinks it on a
+    /// later layout pass without realizing it again (it defers container realignment for a
+    /// move to the next layout pass; in practice it has re-realized moved rows).
+    /// </summary>
+    private void UnmountOrphanedContainer(WinUI.ListViewBase listViewBase, WinPrim.SelectorItem container, ContentControl cc)
+    {
+        if (GetElementTag(cc) is null || container.Content is not ReactorRow row) return;
+        bool inList = GetListState(listViewBase) is { } state
+            && state.ByKey.TryGetValue(row.Key, out var current) && ReferenceEquals(current, row);
+        if (inList)
+        {
+            var owner = listViewBase.ContainerFromItem(row);
+            if (owner is null || ReferenceEquals(owner, container)) return;
+        }
+        UnmountItemView(cc, clearContent: false);
     }
 
     private readonly struct ItemsRepeaterKeyAdapter : IReadOnlyList<ItemsRepeaterKeyAdapter.KeyOnly>
@@ -1463,7 +1551,7 @@ public sealed partial class Reconciler
             && CanUpdate(oldContentEl, newContentEl))
         {
             // Reconcile in place
-            var replacement = Update(oldContentEl, newContentEl, existingCtrl, requestRerender);
+            var replacement = UpdateHostedChild(oldContentEl, newContentEl, existingCtrl, requestRerender);
             if (replacement is not null && !ReferenceEquals(liveNode.Content, replacement))
                 liveNode.Content = replacement;
         }
@@ -1501,6 +1589,9 @@ public sealed partial class Reconciler
         Element newRendered;
         Exception? caughtEx = null;
 
+        var record = BeginBoundaryMount();
+        // See MountErrorBoundary: set once the wrapper holds the child or the fallback.
+        bool settled = false;
         _errorBoundaryDepth++;
         try
         {
@@ -1508,19 +1599,30 @@ public sealed partial class Reconciler
             var newControl = Reconcile(node.RenderedElement, newEb.Child, existingChild, requestRerender);
             if (newControl != existingChild)
                 wrapper.Child = newControl;
+            settled = true;
         }
-        catch (Exception ex)
+        // See MountErrorBoundary: a declined RenderError.Propagate() is not caught (issue #1291).
+        catch (Exception ex) when (!RenderErrorDispatch.IsPropagating(ex))
         {
             _logger?.LogWarning(ex, "ErrorBoundary caught render error during update");
             caughtEx = ex;
             if (existingChild is not null)
                 Unmount(existingChild);
+            // What the failed retry mounted but never attached is out of reach of that
+            // Unmount; tear it down too (issue #1291). Without this every failing retry
+            // leaks another set of live subscriptions and native registrations.
+            _boundaryMountJournal = record.OuterJournal;
+            RollBackBoundaryMount(record, existingChild);
             newRendered = newEb.Fallback(ex);
             wrapper.Child = Mount(newRendered, requestRerender);
+            settled = true;
         }
         finally
         {
             _errorBoundaryDepth--;
+            if (!settled && HasBoundaryMountLeftovers(record))
+                RollBackDiscardedBoundaryMount(record, existingChild);
+            EndBoundaryMount(record);
         }
 
         node.ChildElement = newEb.Child;
@@ -1543,6 +1645,23 @@ public sealed partial class Reconciler
         if (control is FrameworkElement fe)
             SetElementTagIfNeeded(fe, newEl);
         return null;
+    }
+
+    /// <summary>
+    /// A same-key <c>Memo(key, …)</c> whose subtree holds a component that updated its own
+    /// state, or any same-key memo during a resource-refresh pass (nothing skips there, so the
+    /// whole subtree is walked and its Theme.Ref values applied again; a brush the factory
+    /// resolved eagerly is equal on both sides and stays as it is, as the styling guide documents).
+    /// The mounted inner element is not kept, so re-run the factory — pure by contract,
+    /// so its output describes what is mounted — and reconcile that output against itself.
+    /// Old and new are the same instances all the way down, so every branch skips by reference
+    /// except the dirty-ancestor path, which descends to the component. Nothing is compared
+    /// against a different key's output, and nothing off the path is touched.
+    /// </summary>
+    private UIElement? UpdateKeyedMemoTowardDirtyDescendant(KeyedMemoElement memo, UIElement control, Action requestRerender)
+    {
+        var inner = WithWrapperKey(memo.Factory() ?? EmptyElement.Instance, memo.Key);
+        return inner is EmptyElement ? null : Update(inner, inner, control, requestRerender);
     }
 
     private static string Truncate(string s, int maxLen) =>

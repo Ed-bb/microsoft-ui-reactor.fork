@@ -60,7 +60,7 @@ dotnet test tests/Reactor.AppTests --filter "ClassName=Microsoft.UI.Reactor.AppT
 <!-- /ai:lock -->
 
 The doc apps under `docs/_pipeline/apps/` are a fourth compile gate
-rather than a test suite: `mur docs compile` builds every one of them,
+rather than a test suite: `dotnet run --project tools/Reactor.DocPipeline -- compile` builds every one of them,
 so a snippet in this guide that names a removed API fails the docs
 build.
 
@@ -300,6 +300,27 @@ depends on it, so the fixture still proves something everywhere. Put an
 issue number in the reason when the skip marks a real product gap: a
 skip is never evidence the product works, only that this run did not
 establish otherwise.
+
+To read the realized tree back after a state change, await the host's
+render loop instead of a fixed delay: both `ReactorHost` and the XAML
+island host `ReactorHostControl` expose `WaitForIdleAsync()` (and an
+`IsIdle` property), which completes once every pending render and
+re-render has run. From the island selftest:
+
+```csharp
+setCount!(1);
+H.Check("HostCtrlIdle_BusyAfterSetState", !host.IsIdle);
+
+await host.WaitForIdleAsync();   // no Task.Delay: the island's tree is now realized
+H.Check("HostCtrlIdle_UpdatedWithoutDelay", (host.Content as TextBlock)?.Text == "Idle:1",
+    $"content={(host.Content as TextBlock)?.Text ?? "null"}");
+```
+
+`WaitForIdleAsync` can also complete before the host is idle: after
+`maxYields` dispatcher yields (50 by default), or immediately when the
+dispatcher refuses work during shutdown. When the readback must be
+settled, check `host.IsIdle` after the await, or pass a larger
+`maxYields`.
 
 ## Tips
 

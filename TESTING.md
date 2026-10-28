@@ -246,9 +246,48 @@ For faster iteration with raw TAP output, you can bypass MSTest and run the Host
 # Raw TAP output
 dotnet run --project tests/Reactor.AppTests.Host -- --self-test
 
-# Filter by fixture name prefix
+# Filter by fixture name (a case-insensitive substring match, so a prefix works)
 dotnet run --project tests/Reactor.AppTests.Host -- --self-test --filter "Flex"
+
+# One CI shard: the k-th of n round-robin slices of the corpus
+dotnet run --project tests/Reactor.AppTests.Host -- --self-test --shard 1/2
 ```
+
+### Sharding the corpus across runners
+
+CI splits the selftest corpus in two for the Selftests, Packaged Selftests, AOT Selftests and
+Coverage jobs, one runner per half, with `--shard <k>/<n>`. The split lives in
+`tests/_shared/SelfTestShard.cs`, which both hosts and both wrappers compile.
+
+- **It is a partition by construction.** Non-pinned fixtures are dealt round-robin in registry
+  order, so each of them lands in exactly one shard and a new fixture needs no list edit.
+- **Pinned controls run in every shard.** `SelfTestVerdict_OnlySkips_PositiveControl` and
+  `Packaged_IdentityGuard` are what the wrappers' suite-level checks assert on.
+- **The shard is selected before `--filter`**, so a fixture's shard does not depend on the filter.
+- **A malformed spec exits 2** before anything runs. Failing open would run all or none of the
+  suite while still looking sharded.
+
+`--list-fixtures` honours `--shard` too, so discovery and the run select the same set. The wrappers
+take the shard from `REACTOR_SELFTEST_SHARD=<k>/<n>` and run it with no other change. Two tests
+make sure no shard quietly drops part of the suite:
+
+- `Shards_PartitionTheCorpus` lists every shard and requires each non-pinned fixture in exactly one
+  of them and the pinned controls in all of them. Unsharded runs check a 1/2 + 2/2 split, so the
+  mechanism is proven locally too.
+- `Run_CoversExactlyTheDiscoveredFixtures` requires the run's TAP plan to match discovery.
+
+The AOT job and the coverage lanes run the Host directly, so they use
+`tests/Reactor.AppTests.Host/Test-SelfTestShards.ps1` for the same partition check.
+
+A tiny shard is also the quickest way to smoke-test the whole wrapper locally. With the projects
+already built,
+`$env:REACTOR_SELFTEST_SHARD='1/64'; dotnet test tests/Reactor.SelfTests -p:Platform=x64 --no-build --filter "ClassName~SelfTestBatch"`
+ran 25 fixtures (1/64 of the corpus plus the pinned control) and the 8 suite-level checks in
+about 20 seconds on a dev box.
+
+> **PowerShell gotcha:** the Host is a GUI-subsystem exe. `$x = & $exe --list-fixtures` neither
+> waits for it nor captures its output. Pipe the call instead:
+> `& $exe --list-fixtures 2>&1 | ForEach-Object { "$_" }`.
 
 ### Not every test here wraps a TAP fixture
 
@@ -454,6 +493,10 @@ This shape cost six separate investigations before it was diagnosed (issue #988)
 
 > **A third mode is deliberately absent from the table: an all-green run whose process still exits non-zero.** Every fixture reports `ok`, the trailer is present, nothing is skipped — and the Host then faults on the way out (`STATUS_STOWED_EXCEPTION` / `0xC000027B` is the usual one under WinUI). There is no `_abortedReason` for this and there should not be: nothing was interrupted and no fixture can be blamed, so a row keyed on an abort prefix would be unreachable. It surfaces as its own named failure instead — **`HostProcessExitsCleanly_NoTeardownCrash`** — which prints the exit code with its NTSTATUS interpretation. **If that test is the only red one, read the classified code and look at teardown: not at a fixture, and not at the budget.** Note this diagnosis does *not* reach the coverage leg: `tools/coverage/run-coverage.ps1` runs the Host directly under `dotnet-coverage` rather than through this wrapper, so the same fault there appears only as a non-zero exit from the collect step.
 
+> **A `0xC000027B` names its exception in the log.** When managed code throws into WinUI (an event handler, a timer tick) and nothing handles it, WinUI fail-fasts the Host with `STATUS_STOWED_EXCEPTION`, mid-run or on the way out. Just before that, the Host writes `# Unhandled exception in fixture <name>: <type> 0x<HRESULT>: <message>` followed by the managed stack as `#   ` comment lines. Read those first. They are in the Host's own stdout, so they reach every leg, the coverage lanes included. The fixture named is the one *in flight*; for a late callback such as a timer tick or a deferred event it need not be the fixture that armed it, and the stack says whose event it was. Example: an `AutoSuggestBox` dropped within 150 ms of a text change used to fail-fast one or two fixtures later, from its deferred `TextChanged` (see `AutoSuggestBoxCollectedStateTickFixture`).
+
+> **A native-origin `0xC000027B` has no stack to print.** When a WinUI component fails in its *own* native code (for example while a window is being destroyed), the exception printed is a bare `COMException` with no `at` lines (issue #1345: `COMException 0x80004005: Unspecified error` after a TitleBar window closed). The printer also writes the exception's `Exception.Data` entries (`RestrictedDescription` and similar) as `#   data` lines, but the originating native stack exists only in a crash dump. The packaged CI job therefore has WER write a dump of `Reactor.PackagedTests.Host.exe`. When the job fails, it runs `cdb` `!analyze -v` against that dump on the runner and prints the report in a collapsed `cdb analysis of <dump>` log group. The dump itself is never uploaded, so no process memory leaves the runner. Fixtures that close a secondary window where such a failure is expected wrap the close in `AsyncTeardownGuard.CloseAndSettleAsync`. It marks only a native-origin `E_FAIL` / teardown-reentry `COMException` as handled, and only while the close settles, and prints `# <site>: handled an async native teardown exception` so the event stays in the log. Use it for teardown you do not own; never use it around the behaviour a fixture asserts.
+
 Positional attribution means **unproven, not exonerated**. The absence of a `HANG_DETECTED` signal does not clear `X`: the watchdog can be disabled by env or by an attached debugger, and a pathologically slow or order-dependent fixture can pump the dispatcher often enough never to trip it. Start with suite duration; if duration looks normal, `X` becoming the suspect again is the one scenario that fits.
 
 > **The trailer states what the Host *got to do* — not *which binary did it*.** Every reading above assumes the Host you ran was built from the tree you are debugging, and `--no-build` does not check that. If the preceding build failed and an earlier binary is still on disk, the run proceeds against the stale one and emits a byte-identical trailer, exit code and TAP plan. Nothing in the output distinguishes it. Note the direction: this fails toward **a false green, which ends an investigation**, whereas the more familiar staleness traps produce a false red, which starts one. So whenever you pass `--no-build`, make the build a separate step that fails closed:
@@ -473,6 +516,7 @@ Fixtures with no result are reported **Skipped (`Assert.Inconclusive`)**, not pa
 | `REACTOR_SELFTEST_TIMEOUT_SECONDS` | 900 | Hard process budget. Malformed or non-positive values fall back to the default. |
 | `REACTOR_SELFTEST_HANG_TIMEOUT_SECONDS` | 60 | Host off-dispatcher hang watchdog. **`0` or negative disables it entirely** (useful when attaching a debugger, which also auto-disables it); malformed values fall back to 60. |
 | `REACTOR_SELFTEST_VIZ_PACING` | unset | Set to `1` to restore the human-observable pacing in the docking visual-demo fixtures. |
+| `REACTOR_SELFTEST_SHARD` | unset | `<k>/<n>` runs one shard of the corpus (see [Sharding](#sharding-the-corpus-across-runners)). Read by both wrappers. Malformed values fail discovery rather than falling back. |
 
 **Keeping the margin.** The Host emits `# Suite elapsed: <seconds>` and `# Fixture time: <name> <ms>` as TAP comments (inert to `ParseTap` and to CI's `^not ok ` greps), and `SelfTestBatch.SuiteDuration_WithinBudget` reports elapsed / budget / % every run. Above `SuiteDurationWarnSeconds` it also reports Inconclusive — deliberately not a failure, since duration depends on runner speed and a hard gate here would itself be a flake. If you see that warning, trim suite time or raise the budget **deliberately**, rather than discovering the cap in an unrelated red PR.
 
@@ -569,7 +613,7 @@ Output is the same TAP stream as a normal selftest run. The runner detects AOT a
 
 A native crash terminates the AOT process — the per-fixture managed watchdog can't fire. Iterate by tailing the TAP output for the *last* `# Running: <name>` line before exit, add that name to the skip list, and re-run. Be conservative when wildcarding a family: many `Family_*` fixtures pass even when one member crashes.
 
-**4. Expected pass count.** As of 2026-08-24, an AOT run of the suite produces: 1447 fixtures total → 17 skipped, 1430 passed, 0 failed. Sixteen of those skips come from `DefaultAotSkipPatterns` (they are the ones tagged `# SKIP crashes/hangs under NativeAOT`); the seventeenth is `SelfTestVerdict_OnlySkips_PositiveControl`, which is skipped by design on every run — the non-AOT run on the same commit reports 1447 total, 1 skipped, 0 failed. The skip list covers fixtures that exercise subsystems documented as not-yet-AOT-clean in [`docs/aot-support.md`](docs/aot-support.md) (PropertyGrid auto-discovery, three Devtools fixtures whose reflection targets get trimmed — `fire`'s handler lookup, `state`'s hook read, and DependencyProperty discovery for `properties`/`setProperty` — `UseObservable` on POCOs, hot-reload state migration, XAML-metadata-dependent control hosting). When you fix one of those subsystems, drop the corresponding entries from `DefaultAotSkipPatterns` — `SelfTestRunner.ValidateDefaultSkipPatterns` aborts the run (TAP `Bail out!`, exit 1) if an entry stops matching a real fixture, but nothing detects an entry that has merely started *passing*, so re-probe periodically.
+**4. Expected pass count.** As of 2026-10-05, an AOT run of the suite produces: 1598 fixtures total → 19 skipped, 0 failed. Seventeen of those skips come from `DefaultAotSkipPatterns` (they are the ones tagged `# SKIP crashes/hangs under NativeAOT`); `SelfTestVerdict_OnlySkips_PositiveControl` is skipped by design on every run; and `ValCov_Issue1262_PredicateCancellationReported` self-skips its checks because `EventListener` callbacks do not flow under a NativeAOT publish. The skip list covers fixtures that exercise subsystems documented as not-yet-AOT-clean in [`docs/aot-support.md`](docs/aot-support.md) (PropertyGrid auto-discovery, three Devtools fixtures whose reflection targets get trimmed — `fire`'s handler lookup, `state`'s hook read, and DependencyProperty discovery for `properties`/`setProperty` — `UseObservable` on POCOs, hot-reload state migration, XAML-metadata-dependent control hosting). When you fix one of those subsystems, drop the corresponding entries from `DefaultAotSkipPatterns` — `SelfTestRunner.ValidateDefaultSkipPatterns` aborts the run (TAP `Bail out!`, exit 1) if an entry stops matching a real fixture, but nothing detects an entry that has merely started *passing*, so re-probe periodically.
 
 ---
 
@@ -786,11 +830,13 @@ once, with a real fixture to pin the contract against.
 
 ### Scope and knobs
 
-The whole corpus runs under identity (~5 min, on its own CI runner).
+The whole corpus runs under identity, split across two CI runners (the test step took 2m35s-3m07s
+per shard on hosted runners in 2026-09).
 
 | Environment variable | Effect |
 |---|---|
 | `REACTOR_PACKAGED_FILTER=<substring>` | Narrow to a subset. `Packaged_IdentityGuard` is fetched in a second pass if your filter excludes it. |
+| `REACTOR_SELFTEST_SHARD=<k>/<n>` | Run one shard, as CI does. Shared with the unpackaged wrapper; `Packaged_IdentityGuard` is pinned into every shard. |
 | `REACTOR_PACKAGED_HOST_DIR=<dir>` | Use a different built layout. Absolute, cwd-relative, or repo-relative. |
 | `REACTOR_PACKAGED_TIMEOUT_SECONDS=<n>` | Override the 900 s process budget. |
 
@@ -970,6 +1016,15 @@ was holding. MSTest does not parallelize unless asked, so the attribute changes 
 it is there so a `.runsettings` or a `--parallel` can't flip the assumption the tier is built on
 without anyone noticing, because the resulting failures would read as ordinary UI flake.
 
+CI instead splits the tier across **two runners**, each with its own desktop, using
+`tests/Reactor.AppTests/Select-E2EShard.ps1`. Shard 1 runs the classes listed in `ci.yml`'s
+`E2E_SHARD1_CLASSES`, and shard 2 runs the exact complement, so a new class lands in shard 2
+automatically. Before either shard runs, discovery must show both halves non-empty and summing
+to the whole suite. Afterwards, each shard's TRX must account for every test it selected. Each
+shard uploads its TRX, which holds the per-test durations to rebalance the list against. The
+selector's discovery-output parser is pinned by `Select-E2EShard.Tests.ps1`, which each shard runs
+before selecting.
+
 ### Don't co-locate the E2E and selftest tiers
 
 CI runs them as separate jobs on separate runners today, and that isolation is load-bearing
@@ -1035,10 +1090,13 @@ dotnet-coverage merge coverage\unit.cobertura.xml coverage\selftest.cobertura.xm
 You don't have to run the merge locally — the **Coverage** workflow
 (`.github/workflows/coverage.yml`) runs this same unit + selftest recipe and
 reports the merged line/branch numbers, **compared against a cached `main`
-baseline**.
+baseline**. It runs the recipe as parallel lanes: one unit lane and two selftest
+shards, each running `Measure-Coverage.ps1 -Part Unit|SelfTest`. A final
+**Merged coverage** job unions their reports (`-Part Merge`), and refuses to
+report a number unless it received exactly the expected lane reports.
 
 - **Automatic on every PR:** it runs on each PR commit, measures the merged
-  coverage of the **PR head** (one instrumented pass), and posts a **sticky
+  coverage of the **PR head** (a unit lane and two selftest shards, merged), and posts a **sticky
   comment** showing `base | PR | Δ` for line + branch, with a direction-aware
   status (✅ higher / ⚠️ lower / ≈ within noise). It updates in place on new
   commits. No action needed — it just works. (Doc-only PRs are skipped.)
@@ -1061,7 +1119,7 @@ runs PR code, so it holds no write token) and uploads only the raw numbers; the
 privileged `coverage-comment.yml` (`workflow_run`) checks out trusted code,
 re-validates the head numbers **and** the cached `main` baseline, renders the
 comparison comment, and posts it, resolving the target PR from the trusted
-`workflow_run` head SHA. Measuring only the head keeps a PR at ~one instrumented
-pass; a missing baseline is non-fatal (it degrades to a "baseline unavailable"
+`workflow_run` head SHA. Measuring only the head, not the base as well, keeps a PR to
+one measurement; a missing baseline is non-fatal (it degrades to a "baseline unavailable"
 note). See [`tests/coverage/ci/README.md`](tests/coverage/ci/README.md) and the
 workflow headers for the full layout + security rationale.

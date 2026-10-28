@@ -67,6 +67,7 @@ FlexColumn(Element[] children) → FlexElement
 FlexRow(Element[] children) → FlexElement
 FlipView(Element[] items) → FlipViewElement
 FlipView(Optional<int> selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → FlipViewElement
+FlipView(int selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → FlipViewElement
 FlipView(int? selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → FlipViewElement
 FlipView<T>(IReadOnlyList<T> items, Func<T, int, Element> viewBuilder) → TemplatedFlipViewElement<T>
 FlipView<T>(IReadOnlyList<T> items, Func<T, string> keySelector, Func<T, int, Element> viewBuilder) → TemplatedFlipViewElement<T>
@@ -78,6 +79,7 @@ Frame(Type sourcePageType = null, object navigationParameter = null) → FrameEl
 Grid(GridSize[] columns, GridSize[] rows, Element[] children) → GridElement
 GridView(Element[] items) → GridViewElement
 GridView(Optional<int> selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → GridViewElement
+GridView(int selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → GridViewElement
 GridView(int? selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → GridViewElement
 GridView<T>(IReadOnlyList<T> items, Func<T, int, Element> viewBuilder) → TemplatedGridViewElement<T>
 GridView<T>(IReadOnlyList<T> items, Func<T, string> keySelector, Func<T, int, Element> viewBuilder) → TemplatedGridViewElement<T>
@@ -113,6 +115,7 @@ Line(double x1, double y1, double x2, double y2) → LineElement
 ListBox(string[] items, Optional<int> selectedIndex = default, Action<int> onSelectedIndexChanged = null) → ListBoxElement
 ListView(Element[] items) → ListViewElement
 ListView(Optional<int> selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → ListViewElement
+ListView(int selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → ListViewElement
 ListView(int? selectedIndex, Action<int> onSelectedIndexChanged = null, Element[] items) → ListViewElement
 ListView<T>(IReadOnlyList<T> items, Func<T, int, Element> viewBuilder) → TemplatedListViewElement<T>
 ListView<T>(IReadOnlyList<T> items, Func<T, string> keySelector, Func<T, int, Element> viewBuilder) → TemplatedListViewElement<T>
@@ -145,6 +148,7 @@ PersonPicture() → PersonPictureElement
 PipsPager(int numberOfPages, Optional<int> selectedPageIndex = default, Action<int> onSelectedPageIndexChanged = null) → PipsPagerElement
 Pivot(Optional<int> selectedIndex, Action<int> onSelectedIndexChanged = null, PivotItemData[] items) → PivotElement
 Pivot(PivotItemData[] items) → PivotElement
+Pivot(int selectedIndex, Action<int> onSelectedIndexChanged = null, PivotItemData[] items) → PivotElement
 Pivot(int? selectedIndex, Action<int> onSelectedIndexChanged = null, PivotItemData[] items) → PivotElement
 PivotItem(string header, Element content) → PivotItemData
 Popup(Element child, bool isOpen = false, Action onClosed = null) → PopupElement
@@ -183,6 +187,7 @@ SymbolIcon(string symbol) → SymbolIconData
 Tab(string header, Element content) → TabViewItemData
 TabView(Optional<int> selectedIndex, Action<int> onSelectedIndexChanged = null, TabViewItemData[] tabs) → TabViewElement
 TabView(TabViewItemData[] tabs) → TabViewElement
+TabView(int selectedIndex, Action<int> onSelectedIndexChanged = null, TabViewItemData[] tabs) → TabViewElement
 TabView(int? selectedIndex, Action<int> onSelectedIndexChanged = null, TabViewItemData[] tabs) → TabViewElement
 TeachingTip(string title, string subtitle = null, ElementRef target = null) → TeachingTipElement
 TextBlock(string content) → TextBlockElement
@@ -215,6 +220,8 @@ WebView2(Uri source = null) → WebView2Element
 When(bool condition, Func<Element> then) → Element
 WrapGrid(Element[] children) → WrapGridElement
 WrapGrid(int maxRowsOrColumns, Element[] children) → WrapGridElement
+XamlHost(Func<FrameworkElement> factory, Action<FrameworkElement> updater = null, string typeKey = null) → XamlHostElement
+XamlPage(Type pageType, object parameter = null) → XamlPageElement
 
 ## Modifiers (extension methods on Element)
 # Fluent — preserves concrete element type. Type-specific sugar (e.g. .Bold()
@@ -830,6 +837,7 @@ TitleBarElement.Icon(string imageUri) → TitleBarElement
 TitleBarElement.NoIcon() → TitleBarElement
 TitleBarElement.PaneToggleButtonVisible(bool visible) → TitleBarElement
 TitleBarElement.PaneToggleRequested(Action handler) → TitleBarElement
+TitleBarElement.PreferredTheme(WindowTitleBarTheme theme) → TitleBarElement
 TitleBarElement.RightHeader(Element rightHeader) → TitleBarElement
 TitleBarElement.Set(Action<TitleBar> configure) → TitleBarElement
 TitleBarElement.Subtitle(string subtitle) → TitleBarElement
@@ -908,10 +916,8 @@ RenderContext.UseEffect<T1>(Func<Action> effectWithCleanup, T1 d1) → void
 RenderContext.UseElementFocus(FocusState state = FocusState.Programmatic) → ValueTuple<ElementRef, Action>
 RenderContext.UseElementRef<T>() → ElementRef<T>
 RenderContext.UseExternalStore<TSnapshot>(Func<Action, Action> subscribe, Func<TSnapshot> getSnapshot, IEqualityComparer<TSnapshot> comparer = null) → TSnapshot
-RenderContext.UseFilePickerAsync(FilePickerOptions options) → Task<StorageFile>
 RenderContext.UseFocus() → FocusManager
 RenderContext.UseFocusTrap(bool isActive) → FocusTrapHandle
-RenderContext.UseFolderPickerAsync(FolderPickerOptions options) → Task<StorageFolder>
 RenderContext.UseHighContrast() → bool
 RenderContext.UseHighContrastScheme() → string
 RenderContext.UseInfiniteResource<TItem, TCursor>(Func<TCursor, CancellationToken, Task<Page<TItem, TCursor>>> fetchPage, QueryCache cache, object[] deps, InfiniteResourceOptions options = null, IHookDispatcher dispatcher = null, Func<int, TCursor> cursorFromPageIndex = null) → InfiniteResource<TItem>
@@ -1011,8 +1017,10 @@ AnimationKind { None, Default, Spring, EaseIn, EaseOut, EaseInOut }
 BackdropKind { None, Mica, MicaAlt, DesktopAcrylic, AcrylicThin, Transparent }
 ColorScheme { Light, Dark, HighContrast }
 KeyedListDiagnosticKind { NullKey, DuplicateKey }
+ReactorHostKind { WindowHost, HostControl }
 ItemsViewLayoutKind { StackLayout, LinedFlowLayout, UniformGridLayout }
 PersistedScope { Window, Application }
+RenderErrorSource { RootRender, ComponentRender, Reconcile, Effects, Cleanup }
 TemplatedControlKind { ListView, GridView, FlipView }
 V1UnmountDisposition { CollectSelf, ContinueDefaultTraversal, SkipPool }
 BlockStatus { Loading, Loaded, Failed }
@@ -1053,6 +1061,7 @@ WindowStartPosition { Default, CenterOnPrimary, CenterOnOwner, Manual, CenterOnC
 WindowState { Normal, Minimized, Maximized, FullScreen, CompactOverlay }
 WindowStyle { Default, None, ToolWindow }
 WindowTitleBarHeight { Standard, Tall, Collapsed }
+WindowTitleBarTheme { Legacy, UseDefaultAppMode, Light, Dark }
 
 ## Public types (ctors / properties / methods / events)
 # Every public type not already covered above. Members alphabetized within
@@ -1196,6 +1205,7 @@ GetHashCode() → int
 ToString() → string
 
 ### record AppBarItemBase
+SourceLocation? CallSite { get; init; }
 Equals(AppBarItemBase other) → bool
 Equals(object obj) → bool
 GetHashCode() → int
@@ -1234,6 +1244,17 @@ Remove(string key) → void
 Set<T>(string key, T value) → void
 Trim(int targetCount) → int
 TryGet<T>(string key, ref T value) → bool
+
+### record AppliedProperty
+new(string Modifier, string Property, string Value)
+string Modifier { get; init; }
+string Property { get; init; }
+string Value { get; init; }
+Deconstruct(ref string Modifier, ref string Property, ref string Value) → void
+Equals(AppliedProperty other) → bool
+Equals(object obj) → bool
+GetHashCode() → int
+ToString() → string
 
 ### record ArrayTypeMetadata
 new()
@@ -1727,6 +1748,20 @@ Equals(object obj) → bool
 GetHashCode() → int
 ToString() → string
 
+### record ComponentSnapshot
+new(string Name, string Kind, bool IsRoot, IReadOnlyList<DiagnosticValue> Props, IReadOnlyList<DiagnosticValue> State, IReadOnlyList<DiagnosticValue> Contexts)
+IReadOnlyList<DiagnosticValue> Contexts { get; init; }
+IReadOnlyList<DiagnosticValue> Props { get; init; }
+IReadOnlyList<DiagnosticValue> State { get; init; }
+bool IsRoot { get; init; }
+string Kind { get; init; }
+string Name { get; init; }
+Deconstruct(ref string Name, ref string Kind, ref bool IsRoot, ref IReadOnlyList<DiagnosticValue> Props, ref IReadOnlyList<DiagnosticValue> State, ref IReadOnlyList<DiagnosticValue> Contexts) → void
+Equals(ComponentSnapshot other) → bool
+Equals(object obj) → bool
+GetHashCode() → int
+ToString() → string
+
 ### static class ComponentUseMemoCellsExtensions
 Component.UseMemoCells<T>(IReadOnlyList<T> items, Func<T, int, Element> builder, object[] dependencies) → Element[]
 Component.UseMemoCellsByIndex<T>(IReadOnlyList<T> items, IReadOnlyList<int> changedIndices, Func<T, int, Element> builder, object[] dependencies) → Element[]
@@ -1944,6 +1979,21 @@ string ProjectIdentifier { get; init; }
 string ScreenshotOutputPath { get; init; }
 Deconstruct(ref DevtoolsSubverb? Subverb, ref string ComponentName, ref bool VsCodeMode, ref int Fps, ref string ListOutputPath, ref string ScreenshotOutputPath, ref int? McpPort, ref string LogLevel, ref McpTransport Transport, ref bool UsedDeprecatedPreview, ref bool PreviewAndDevtoolsConflict, ref string ProjectIdentifier, ref bool LogsDisabled, ref int? LogsCapacityMb, ref bool EmbedRequested, ref WindowEmbedStyle EmbedStyle, ref int? EmbedHostPid, ref string EmbedValidationError, ref bool EmbedAutoEnabledVsCode, ref double? WindowWidth, ref double? WindowHeight, ref double? WindowX, ref double? WindowY) → void
 Equals(DevtoolsCliOptions other) → bool
+Equals(object obj) → bool
+GetHashCode() → int
+ToString() → string
+
+### record DiagnosticValue
+new(int Index, string Name, string Kind, string Type, string Value, bool Editable, bool MigratedByHotReload)
+bool Editable { get; init; }
+bool MigratedByHotReload { get; init; }
+int Index { get; init; }
+string Kind { get; init; }
+string Name { get; init; }
+string Type { get; init; }
+string Value { get; init; }
+Deconstruct(ref int Index, ref string Name, ref string Kind, ref string Type, ref string Value, ref bool Editable, ref bool MigratedByHotReload) → void
+Equals(DiagnosticValue other) → bool
 Equals(object obj) → bool
 GetHashCode() → int
 ToString() → string
@@ -2501,11 +2551,28 @@ ToString() → string
 
 ### record FilePickerOptions
 new(IReadOnlyList<string> FileTypeFilter = null, PickerLocationId SuggestedStartLocation = PickerLocationId.DocumentsLibrary, string CommitButtonText = "")
+IReadOnlyList<FileTypeChoice> FileTypeChoices { get; init; }
 IReadOnlyList<string> FileTypeFilter { get; init; }
 PickerLocationId SuggestedStartLocation { get; init; }
+PickerViewMode? ViewMode { get; init; }
+int? InitialFileTypeIndex { get; init; }
 string CommitButtonText { get; init; }
+string SettingsIdentifier { get; init; }
+string SuggestedFolder { get; init; }
+string SuggestedStartFolder { get; init; }
+string Title { get; init; }
 Deconstruct(ref IReadOnlyList<string> FileTypeFilter, ref PickerLocationId SuggestedStartLocation, ref string CommitButtonText) → void
 Equals(FilePickerOptions other) → bool
+Equals(object obj) → bool
+GetHashCode() → int
+ToString() → string
+
+### record FileTypeChoice
+new(string Label, IReadOnlyList<string> Extensions)
+IReadOnlyList<string> Extensions { get; init; }
+string Label { get; init; }
+Deconstruct(ref string Label, ref IReadOnlyList<string> Extensions) → void
+Equals(FileTypeChoice other) → bool
 Equals(object obj) → bool
 GetHashCode() → int
 ToString() → string
@@ -2669,7 +2736,12 @@ bool IsActive { get; }
 ### record FolderPickerOptions
 new(PickerLocationId SuggestedStartLocation = PickerLocationId.DocumentsLibrary, string CommitButtonText = "")
 PickerLocationId SuggestedStartLocation { get; init; }
+PickerViewMode? ViewMode { get; init; }
 string CommitButtonText { get; init; }
+string SettingsIdentifier { get; init; }
+string SuggestedFolder { get; init; }
+string SuggestedStartFolder { get; init; }
+string Title { get; init; }
 Deconstruct(ref PickerLocationId SuggestedStartLocation, ref string CommitButtonText) → void
 Equals(FolderPickerOptions other) → bool
 Equals(object obj) → bool
@@ -3211,8 +3283,9 @@ Write(string id, byte[] data) → void
 bool ShowFrequent { get; set; }
 bool ShowRecent { get; set; }
 string AppUserModelId { get; set; }
-ClearAsync() → Task
-UpdateAsync(IEnumerable<JumpListItem> items) → Task
+ClearAsync() → Task<IReadOnlyList<string>>
+GetRemovedArgumentsAsync() → Task<IReadOnlyList<string>>
+UpdateAsync(IEnumerable<JumpListItem> items) → Task<IReadOnlyList<string>>
 
 ### record JumpListItem
 new(string Title, string Arguments, JumpListItemKind Kind = JumpListItemKind.Task, string Description = null, WindowIcon Icon = null, string GroupCategory = null)
@@ -3247,7 +3320,9 @@ new(DateTime TimestampUtc, string ControlContext, KeyedListDiagnosticKind Kind, 
 DateTime TimestampUtc { get; init; }
 IReadOnlyList<string> SampleKeys { get; init; }
 KeyedListDiagnosticKind Kind { get; init; }
+SourceLocation? CallSite { get; init; }
 int Count { get; init; }
+string ComponentName { get; init; }
 string ControlContext { get; init; }
 Deconstruct(ref DateTime TimestampUtc, ref string ControlContext, ref KeyedListDiagnosticKind Kind, ref IReadOnlyList<string> SampleKeys, ref int Count) → void
 Equals(KeyedListDiagnostic other) → bool
@@ -3669,6 +3744,7 @@ GetHashCode() → int
 ToString() → string
 
 ### record MenuFlyoutItemBase
+SourceLocation? CallSite { get; init; }
 Equals(MenuFlyoutItemBase other) → bool
 Equals(object obj) → bool
 GetHashCode() → int
@@ -4466,6 +4542,7 @@ IReadOnlyList<ReactorTrayIcon> TrayIcons { get; }
 IReadOnlyList<ReactorWindow> Windows { get; }
 IWindowPersistenceStore WindowPersistenceStore { get; set; }
 ReactorWindow PrimaryWindow { get; }
+RenderErrorHandler DefaultRenderErrorHandler { get; set; }
 ShutdownPolicy ShutdownPolicy { get; set; }
 bool DevtoolsEnabled { get; }
 Exit(int exitCode = 0) → void
@@ -4549,8 +4626,17 @@ ToString() → string
 Register(IReactorDevtoolsHost host) → void
 
 ### static class ReactorDiagnostics
+DependencyProperty SourceProperty { get; }
 IReadOnlyList<KeyedListDiagnostic> RecentKeyedListWarnings { get; }
+bool IsSourcePublishingEnabled { get; }
 ClearRecentKeyedListWarnings() → void
+DescribeComponent(UIElement element) → ComponentSnapshot
+GetAppliedProperties(UIElement control) → IReadOnlyList<AppliedProperty>
+GetHosts() → IReadOnlyList<ReactorHostInfo>
+GetReferenceEdges(UIElement control) → IReadOnlyList<ReferenceEdgeSnapshot>
+GetSource(DependencyObject element) → string
+Rerender(UIElement element) → bool
+TrySetState(UIElement element, int hookIndex, string text, ref string error) → bool
 
 ### static class ReactorDisplay
 DisplayInfo Primary { get; }
@@ -4586,6 +4672,8 @@ Action<double, double, double> OnRenderComplete { get; set; }
 Border ContentTarget { get; set; }
 ReactorWindow OwningWindow { get; }
 Reconciler Reconciler { get; }
+RenderErrorHandler EffectiveRenderErrorHandler { get; }
+RenderErrorHandler RenderErrorHandler { get; set; }
 Window Window { get; }
 bool IsIdle { get; }
 ref RenderStats Stats { get; }
@@ -4595,15 +4683,33 @@ Mount(Func<RenderContext, Element> renderFunc) → void
 WaitForIdleAsync(int maxYields = 50) → Task
 
 ### class ReactorHostControl
+new()
 new(Component component = null, ILogger logger = null)
 Action<double, double, double> OnRenderComplete { get; set; }
 Func<Component> ComponentFactory { get; set; }
 Reconciler Reconciler { get; }
+RenderErrorHandler EffectiveRenderErrorHandler { get; }
+RenderErrorHandler RenderErrorHandler { get; set; }
+RenderStats Stats { get; }
+Type ComponentType { get; set; }
+bool IsIdle { get; }
 object Props { get; set; }
-ref RenderStats Stats { get; }
 Dispose() → void
 Mount(Component component) → void
 Mount(Func<RenderContext, Element> renderFunc) → void
+WaitForIdleAsync(int maxYields = 50) → Task
+
+### class ReactorHostInfo
+FrameworkElement HostElement { get; }
+ReactorHost Host { get; }
+ReactorHostControl HostControl { get; }
+ReactorHostKind Kind { get; }
+ReactorWindow ReactorWindow { get; }
+SourceLocation? MountSite { get; }
+UIElement RootControl { get; }
+Window Window { get; }
+string RootComponentName { get; }
+string RootRenderFunctionName { get; }
 
 ### static class ReactorSourceMap
 bool Enabled { get; set; }
@@ -4613,7 +4719,9 @@ GetSource(UIElement control) → SourceLocation?
 new()
 
 ### static class ReactorTrace
+GetComponentControl(long componentId) → UIElement
 Subscribe(Action<ReactorEvent> onEvent, EventLevel level = EventLevel.Verbose, EventKeywords keywords = EventKeywords.All) → IDisposable
+TryGetComponentId(UIElement control, ref long componentId) → bool
 
 ### class ReactorTrayIcon
 TrayIconSpec Spec { get; }
@@ -4725,6 +4833,21 @@ ToString() → string
 new(T initial)
 T Current { get; set; }
 
+### record ReferenceEdgeSnapshot
+new(string Property, bool IsList, int Index, string TargetAutomationId, string ExpectedTargetTypeName, bool IsResolved, UIElement Target)
+UIElement Target { get; init; }
+bool IsList { get; init; }
+bool IsResolved { get; init; }
+int Index { get; init; }
+string ExpectedTargetTypeName { get; init; }
+string Property { get; init; }
+string TargetAutomationId { get; init; }
+Deconstruct(ref string Property, ref bool IsList, ref int Index, ref string TargetAutomationId, ref string ExpectedTargetTypeName, ref bool IsResolved, ref UIElement Target) → void
+Equals(ReferenceEdgeSnapshot other) → bool
+Equals(object obj) → bool
+GetHashCode() → int
+ToString() → string
+
 ### static class ReflectionTypeMetadataProvider
 CreateDescriptor(PropertyInfo property, int defaultOrder) → FieldDescriptor
 CreateMetadata(Type type) → TypeMetadata
@@ -4778,6 +4901,11 @@ ToString() → string
 
 ### class RenderContext
 new()
+PickFileAsync(FilePickerOptions options) → Task<PickFileResult>
+PickFolderAsync(FolderPickerOptions options) → Task<PickFolderResult>
+PickMultipleFilesAsync(FilePickerOptions options) → Task<IReadOnlyList<PickFileResult>>
+PickMultipleFoldersAsync(FolderPickerOptions options) → Task<IReadOnlyList<PickFolderResult>>
+PickSaveFileAsync(SaveFilePickerOptions options) → Task<PickFileResult>
 UseBreakpoint(Window window, double minWidth) → bool
 UseBreakpoint(double minWidth) → bool
 UseCallback(Action callback, object[] dependencies) → Action
@@ -4801,8 +4929,6 @@ UseEffect<T1, T2>(Func<Action> effectWithCleanup, T1 d1, T2 d2) → void
 UseEffect<T1>(Action effect, T1 d1) → void
 UseEffect<T1>(Func<Action> effectWithCleanup, T1 d1) → void
 UseExternalStore<TSnapshot>(Func<Action, Action> subscribe, Func<TSnapshot> getSnapshot, IEqualityComparer<TSnapshot> comparer = null) → TSnapshot
-UseFilePickerAsync(FilePickerOptions options) → Task<StorageFile>
-UseFolderPickerAsync(FolderPickerOptions options) → Task<StorageFolder>
 UseHighContrast() → bool
 UseHighContrastScheme() → string
 UseIntl() → IntlAccessor
@@ -4837,6 +4963,14 @@ UseWindowSize() → ValueTuple<double, double>
 UseWindowSize(Window window) → ValueTuple<double, double>
 UseWindowState() → WindowState
 
+### class RenderError
+Exception Exception { get; }
+RenderErrorSource Source { get; }
+bool IsHostLevel { get; }
+bool IsPropagationRequested { get; }
+string ComponentName { get; }
+Propagate() → void
+
 ### struct RenderStats
 double AvgEffectsMs { get; init; }
 double AvgReconcileMs { get; init; }
@@ -4868,9 +5002,15 @@ ToString() → string
 new()
 Set(string key, Brush brush) → ResourceBuilder
 Set(string key, CornerRadius value) → ResourceBuilder
+Set(string key, FontFamily value) → ResourceBuilder
+Set(string key, FontWeight value) → ResourceBuilder
+Set(string key, GridLength value) → ResourceBuilder
 Set(string key, ThemeRef themeRef) → ResourceBuilder
+Set(string key, Thickness value) → ResourceBuilder
+Set(string key, bool value) → ResourceBuilder
 Set(string key, double value) → ResourceBuilder
 Set(string key, string color) → ResourceBuilder
+SetColor(string key, Color value) → ResourceBuilder
 
 ### record ResourceOptions
 new(TimeSpan? StaleTime = null, TimeSpan? CacheTime = null, int RetryCount = 0, bool RefetchOnMount = true, string CacheKey = null, bool RefetchOnWindowFocus = false)
@@ -5086,6 +5226,25 @@ ToString() → string
 
 ### static class RtlHelper
 IsRtlLocale(string locale) → bool
+
+### record SaveFilePickerOptions
+new(IReadOnlyList<FileTypeChoice> FileTypeChoices, string SuggestedFileName = "", PickerLocationId SuggestedStartLocation = PickerLocationId.DocumentsLibrary, string CommitButtonText = "")
+IReadOnlyList<FileTypeChoice> FileTypeChoices { get; init; }
+PickerLocationId SuggestedStartLocation { get; init; }
+bool ShowOverwritePrompt { get; init; }
+int? InitialFileTypeIndex { get; init; }
+string CommitButtonText { get; init; }
+string DefaultFileExtension { get; init; }
+string SettingsIdentifier { get; init; }
+string SuggestedFileName { get; init; }
+string SuggestedFolder { get; init; }
+string SuggestedStartFolder { get; init; }
+string Title { get; init; }
+Deconstruct(ref IReadOnlyList<FileTypeChoice> FileTypeChoices, ref string SuggestedFileName, ref PickerLocationId SuggestedStartLocation, ref string CommitButtonText) → void
+Equals(SaveFilePickerOptions other) → bool
+Equals(object obj) → bool
+GetHashCode() → int
+ToString() → string
 
 ### record ScaleTransition
 new(float From)
@@ -5316,10 +5475,12 @@ GetHashCode() → int
 ToString() → string
 
 ### struct SourceLocation
-new(string FilePath, int LineNumber)
+new(string FilePath, int LineNumber, int ColumnNumber)
+int ColumnNumber { get; init; }
 int LineNumber { get; init; }
+string DeclaredName { get; }
 string FilePath { get; init; }
-Deconstruct(ref string FilePath, ref int LineNumber) → void
+Deconstruct(ref string FilePath, ref int LineNumber, ref int ColumnNumber) → void
 Equals(SourceLocation other) → bool
 Equals(object obj) → bool
 GetHashCode() → int
@@ -5816,6 +5977,7 @@ GetHashCode() → int
 ToString() → string
 
 ### static class Theme
+NotifyResourcesChanged() → void
 Ref(string resourceKey) → ThemeRef
 
 ### struct ThemeRef
@@ -5881,6 +6043,7 @@ Element Content { get; init; }
 Element RightHeader { get; init; }
 IconData Icon { get; init; }
 WindowTitleBarHeight? HeightOption { get; init; }
+WindowTitleBarTheme? PreferredTheme { get; init; }
 bool AutoRefreshDragRegions { get; init; }
 bool IsBackButtonEnabled { get; init; }
 bool IsBackButtonVisible { get; init; }
@@ -6311,6 +6474,7 @@ BackdropChoice Backdrop { get; init; }
 EmbedRequest Embed { get; init; }
 PresenterKind Presenter { get; init; }
 ReactorWindow Owner { get; init; }
+RenderErrorHandler RenderErrorHandler { get; init; }
 ValueTuple<double, double>? ManualPosition { get; init; }
 WindowCornerStyle CornerStyle { get; init; }
 WindowIcon Icon { get; init; }
@@ -6322,6 +6486,7 @@ WindowStartPosition PersistenceFallback { get; init; }
 WindowStartPosition StartPosition { get; init; }
 WindowStyle Style { get; init; }
 WindowTitleBarHeight? TitleBarHeight { get; init; }
+WindowTitleBarTheme? TitleBarTheme { get; init; }
 bool ActivateOnOpen { get; init; }
 bool IgnorePointerInput { get; init; }
 bool IsMaximizable { get; init; }

@@ -168,7 +168,7 @@ Same shape as Boundary A: loopback-only HTTP (`http://127.0.0.1:<port>/mcp`) wit
 | Slow-loris / connection exhaustion | `HeaderWait`, `EntityBody`, `IdleConnection`, `RequestQueue` all bounded at 10–15 s | `Start` lines 95–103 |
 | Threadpool exhaustion | 16-way dispatch gate; over-quota requests get HTTP 503 with `Retry-After: 1` | `_dispatchGate` line 34, `ListenAsync` lines 203–215 |
 | Body-bomb | 4 MiB hard cap; over-cap requests get HTTP 413 before the body is read fully | `MaxBodyBytes` line 38, `HandleSwitchComponent` lines 451–456 |
-| Port TOCTOU steal between `FindFreePort` and `HttpListener.Start` | `TcpListener` kept alive across the handoff; placeholder released only after `HttpListener` binds | `AcquireFreePortHolding` line 518, `Start` lines 109–110 |
+| Port TOCTOU steal between probing a free port and `HttpListener.Start` | Bind-and-retry: a placeholder socket can't be held across the bind (HTTP.sys refuses a port any other socket owns), so if another process takes the probed port first, `Start` probes a new one and binds again (bounded). `CAPTURE_PORT` is announced only after the bind succeeds | `LoopbackHttpListener.Start`, `PreviewCaptureServer.Start` |
 
 **Residual risk:**
 
@@ -186,6 +186,7 @@ Same shape as Boundary A: loopback-only HTTP (`http://127.0.0.1:<port>/mcp`) wit
 **Mitigations:** identical shape to [§7.1](#71-preview-capture-server) — per-launch bearer (line 80), 1 MiB body cap (`MaxRequestBodyBytes` line 55), 16-way dispatch gate (line 43), 10 s I/O timeouts (lines 115–122), loopback bind (line 84). Plus:
 
 - **Single-instance lockfile** per project (`LockfileRegistry.PathFor(projectIdentifier)` — per-user tempdir) prevents two dev sessions racing on the same MCP endpoint and provides the channel by which the bearer token reaches the client (`IsAnotherSessionActive` lines 94–106).
+- **Port TOCTOU** handled as in §7.1: an unpinned port is bound with bind-and-retry, and the endpoint (banner, `devtools-ready` line, lockfile) is announced only after the bind. A port pinned with `--mcp-port` is never moved; if another process holds it, `Start` throws `LoopbackPortUnavailableException` and the app exits with code 43.
 - **Stdio transport** uses raw `Console.OpenStandardInput / Output` so the JSON-RPC framing isn't corrupted by app log writes (lines 145–146). Trust derives from the parent process owning the pipe.
 
 **Residual risk:** same as [§7.1](#71-preview-capture-server) — bearer token is a same-user-same-machine secret. The MCP tools can drive the running app: inspect state, synthesize input, switch components. **An attacker who has the token has full control of the dev app's UI thread.** This is by design — that's what devtools are for — and is no worse than the same attacker already having `OpenProcess(PROCESS_VM_READ)` rights on the dev process they share a user with.
@@ -250,6 +251,34 @@ Same shape as Boundary A: loopback-only HTTP (`http://127.0.0.1:<port>/mcp`) wit
 
 **Residual risk:** if `mur` were ever extended to follow URL-style attach targets (e.g., `mur attach https://...`), the threat model expands to cover network identity. **As of the audit date, no such target exists.** Adding one would require revisiting this document.
 
+### 7.7 Inspector diagnostics on controls (`ReactorDiagnostics.SourceProperty`)
+
+**Files:** `src/Reactor/Core/Diagnostics/ReactorSourcePublisher.cs`, `ReactorSourceFormat.cs`, `ReactorDiagnostics.Source.cs`; `src/Reactor/Diagnostics/ReactorSourceMap.StaticInfo.cs`; `build/Reactor.targets` (`$(ReactorDiagnostics)`).
+**Activation:** two gates, both required. At build time, the `Reactor.DevtoolsSupport` feature switch. `$(ReactorDiagnostics)` defaults it on in Debug, Release needs `-p:ReactorDiagnostics=true`, and an explicit project setting wins. At launch, the environment variable `REACTOR_DIAGNOSTICS=1`.
+**Behavior:** writes a string attached DependencyProperty (`.ReactorSource`) on each realized control. It holds the DSL call site (path, line, column), the owning component's type name, the element kind, the element key, the identifier the element was assigned to, and the component's hook variable names. Any XamlDiagnostics client attached to the process can read it. That includes WinUI DevTools, VS Live Property Explorer, and Native AOT apps, because no managed agent is involved.
+
+**Comparison with XAML's runtime source info** (the `SrcInfo` XamlDiagnostics reports from XBF line info):
+
+| | XAML (XBF line info) | Reactor (`ReactorSource`) |
+|---|---|---|
+| Default | Debug builds | Debug builds (`$(ReactorDiagnostics)`) |
+| Release | Opt-in | Opt-in (`-p:ReactorDiagnostics=true`) |
+| Runtime gate | Debugger / XamlDiagnostics attach | `REACTOR_DIAGNOSTICS=1` at launch (nothing is written otherwise) |
+| Path form | Package-relative (`ms-appx:///Pages/Main.xaml`) | Project-relative (`Pages/Main.cs`). Solution-root-relative with `rel=root` for files outside the project. File name only with `rel=0` for files outside both. Deterministic PathMap paths (`/_/…`, `/_1/…`) are kept as they are; any other absolute path is reduced to its file name. Never an absolute developer path. |
+| Readers | Processes that can attach XamlDiagnostics: the same user or an administrator | Same |
+| Trimmed when off | — | Yes. The publishing code is removed from trimmed / Native AOT builds without the switch; the AOT Hello-World trim assertions pin this. |
+
+**Mitigations:**
+
+- Both gates are required. A shipped Release app carries no publishing code (it is trimmed). A Debug app that was not launched for inspection writes nothing.
+- Paths are relativized before they are written, as XAML's are. `Element.CallSite` and `ReactorSourceMap.GetSource` keep full paths; they are in-process APIs and are not exposed through the visual tree.
+- The values are developer-authored identifiers (type, variable and hook names) plus the element key. No props, no state values, no user-visible text.
+
+**Residual risk:**
+
+- An element **key** can be data-derived (for example a list keyed by an email address). In diagnostics mode it is readable by any same-user XamlDiagnostics client, just as it is visible in-process. Keys that are user data should not be inspected on shared machines.
+- `-p:ReactorDiagnostics=true` in a Release build embeds the source-map tables (relative names and lines, plus the absolute project directory used to relativize) in the binary. Do not distribute a build made with it.
+
 ## 8. Threat enumeration against the internal security-review intake
 
 The Microsoft-internal security-review intake form gave succinct answers about Reactor's security posture. This section expands each answer with evidence:
@@ -260,7 +289,7 @@ The Microsoft-internal security-review intake form gave succinct answers about R
 | "CLI/debug tooling runs as developer-invoked user-mode process" | Manifest review of `mur.exe`, install script behavior | No elevation, no scheduled-task install. |
 | "CLI can talk to app as a debugging tool using MCP protocol over HTTP, domain-validated for localhost, with token auth" | `PreviewCaptureServer.cs`, `DevtoolsMcpServer.cs` | Listener prefix bound to `http://127.0.0.1:<port>/`; Host header allow-list at `IsAllowedHost`; bearer constant-time compare at `BearerMatches`. |
 | "No outbound network communication beyond the above" | Repo-wide grep | Only `System.Net.*` usage in `src/Reactor/` is the two `HttpListener` servers above and an `HttpClient` *in CLI Docs subsystem* that targets `127.0.0.1:<port>` of a preview server `mur` itself spawned. |
-| "No unsupported or third-party components" | `ThirdPartyNoticeText.txt`, `Directory.Build.props`, `nuget.config` | Five Microsoft.* / MIT NuGet deps; three source-ported MIT/ISC OSS components (Yoga, md4c, D3); no checked-in `.nupkg` binaries; `nuget.config` clears inherited feeds. |
+| "No unsupported or third-party components" | `ThirdPartyNoticeText.txt`, `Directory.Build.props`, `nuget.config` | Six Microsoft.* / MIT NuGet deps; three source-ported MIT/ISC OSS components (Yoga, md4c, D3); no checked-in `.nupkg` binaries; `nuget.config` clears inherited feeds. |
 | "No prior threat models / security reviews" | Repo audit | This document is the first formal one. README references a 275-finding internal code review — engineering review, not a threat model. |
 
 ## 9. Out-of-scope non-surfaces (with rationale)
@@ -283,7 +312,7 @@ Microsoft's internal Security Assessment policy lists six trust-boundary trigger
 | `nuget.org` for direct & transitive deps | Compromise of upstream feed → poisoned dep gets pulled at restore | `nuget.config` clears inherited feeds and pins to `nuget.org` + `local-nupkgs/`. Dependabot enabled (`.github/dependabot.yml`). CI `vulnerable-packages` job runs [`dotnet list package --vulnerable`](https://learn.microsoft.com/dotnet/core/tools/dotnet-list-package) on every PR and fails on High/Critical findings. |
 | Source-ported OSS (Yoga / md4c / D3) | Upstream defect ported in by hand without notice | `ThirdPartyNoticeText.txt` lists each; `cgmanifest.json` registers them with Component Governance so upstream advisories surface internally. |
 | GitHub repo → NuGet publish | Compromised CI builds malicious package | `.github/workflows/release.yml` builds in `windows-latest` runner; BinSkim (PR #365) and CodeQL provide additional verification before publish. |
-| `GitHub.Copilot.SDK 0.1.32` transitive | Ships a third-party native `copilot.exe` (`runtimes/<rid>/native/`) without Control Flow Guard | Known; tracked under the BinSkim follow-up. Not Reactor-authored. The binary is only present in the `mur` CLI publish artifact, not in the framework NuGet. |
+| `GitHub.Copilot.SDK 1.0.22` transitive | Ships a third-party native `copilot.exe` runtime bundle (`runtimes/<rid>/native/`), downloaded at build time from the github/copilot-cli GitHub releases and SHA-256-verified against the release's `SHA256SUMS.txt`, without Control Flow Guard | Known; tracked under the BinSkim follow-up. Not Reactor-authored. The binary is only present in the `mur` CLI publish artifact, not in the framework NuGet. |
 | Developer-downloaded skill-kit zip | Tampering between Microsoft and developer | Authenticode signing of the zip is a known compliance gap; tracked under the SDL signing workstream. |
 
 ## 11. Known open items / questions for internal security review
@@ -313,3 +342,4 @@ Microsoft's internal Security Assessment policy lists six trust-boundary trigger
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-21 | Chris Anderson | Initial draft for internal security-review intake. Captures runtime baseline at commit `2335e75f`. |
+| 2026-10-02 | Copilot (for the WinUI DevTools effort) | §7.7: inspector diagnostics published on controls (`ReactorSource`); XAML source-info parity (gating, relative paths). |

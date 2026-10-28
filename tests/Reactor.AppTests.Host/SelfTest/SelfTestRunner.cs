@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Reactor.Tests.Shared;
 
 namespace Microsoft.UI.Reactor.AppTests.Host.SelfTest;
 
@@ -15,6 +16,12 @@ namespace Microsoft.UI.Reactor.AppTests.Host.SelfTest;
 internal static class SelfTestRunner
 {
     public static string? Filter { get; set; }
+
+    /// <summary>
+    /// The CI slice to run (<c>--shard k/n</c>), or <see langword="null"/> for the whole corpus.
+    /// Applied before <see cref="Filter"/>; see <see cref="SelfTestShard"/>.
+    /// </summary>
+    public static SelfTestShard? Shard { get; set; }
 
     /// <summary>
     /// Process exit code captured by the final-exit path (<see
@@ -159,8 +166,9 @@ internal static class SelfTestRunner
 
     // Fixtures known to assert-fail under NativeAOT, captured by running
     // tests/Reactor.AppTests.Host/probe-aot-skips.ps1 against the AOT-published
-    // Host. As of WindowsAppSDK#6394 workaround (see Reactor.AppTests.Host.csproj
-    // _CopyWinUIResourcesForAot target), all NATIVE_CRASH skips are gone. What is
+    // Host. Since the WindowsAppSDK#6394 fix (the project .pri reaches the AOT
+    // publish output, via the build tools Reactor depends on), all NATIVE_CRASH
+    // skips are gone. What is
     // left is the buckets below: the UseObservableTree property walk, the
     // Devtools fixtures that reflect over members the trimmer removes,
     // PropertyGrid auto-discovery, the Issue142 XAML-metadata-provider edge
@@ -264,6 +272,14 @@ internal static class SelfTestRunner
         "Issue142_CustomControlPrivateDp_Renders",
         "Issue142_ThirdPartyControlPrivateDp_Renders",
 
+        // Same root cause, for this host's own compiled page: ReactorApplication finds
+        // the host's generated XamlMetaDataProvider only by reflecting over the entry
+        // assembly, nothing roots it (no App.xaml), and AOT trims it, so
+        // XamlDeclaredHostPanel.xaml throws XamlParseException before ReactorHostControl
+        // runs. A vanilla WinUI app's App *is* the provider, so ComponentType works there
+        // under AOT; the code-only failure sibling still runs here. --
+        "Hosting_HostControlXamlComponentType",
+
         // -- Spec 049 Phase 3 component state migration is reflection-based and
         // JIT-only by design: the production entry point is gated on
         // HotReloadService.IsHotReloadLive (MetadataUpdater.IsSupported), which
@@ -344,6 +360,45 @@ internal static class SelfTestRunner
         return false;
     }
 
+    /// <summary>
+    /// Names an exception that escaped into WinUI, as TAP comments, before WinUI decides the
+    /// process's fate. Left unhandled it ends the run with <c>STATUS_STOWED_EXCEPTION</c>
+    /// (0xC000027B), and nothing in the log said where it came from: no <c>not ok</c>, no
+    /// trailer, and the managed stack only in a crash dump. This puts the type, HRESULT, the
+    /// fixture in flight and the managed stack at the end of the log instead. Diagnostic only:
+    /// it does not mark the exception handled.
+    /// </summary>
+    private static void WriteUnhandledException(Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        var fixture = Volatile.Read(ref _currentFixture)?.Name ?? "(between fixtures)";
+        var ex = e.Exception;
+        Console.WriteLine(
+            $"# Unhandled exception in fixture {fixture}: {ex?.GetType().FullName} 0x{(ex?.HResult ?? 0):X8}: " +
+            (e.Message ?? "").ReplaceLineEndings(" "));
+        foreach (var line in (ex?.ToString() ?? "").Split('\n'))
+            Console.WriteLine("#   " + line.TrimEnd('\r'));
+        // A native-origin failure has no managed frames, so the WinRT restricted-error details
+        // the projection attaches to Exception.Data are the only other clue in the log. (#1345)
+        // Best-effort: this is the last thing written before a fail-fast, so a Data entry that
+        // fails to enumerate or format must not cost the flush below.
+        try
+        {
+            if (ex?.Data is { Count: > 0 } data)
+            {
+                foreach (global::System.Collections.DictionaryEntry entry in data)
+                {
+                    if (entry.Value is string or bool or int or long)
+                        Console.WriteLine($"#   data {entry.Key}: {entry.Value}".ReplaceLineEndings(" "));
+                }
+            }
+        }
+        catch (Exception dataEx)
+        {
+            Console.WriteLine($"#   data <unreadable: {dataEx.GetType().Name}>");
+        }
+        Console.Out.Flush();
+    }
+
     private static Task YieldLowPriorityAsync(DispatcherQueue dq)
     {
         // RunContinuationsAsynchronously: don't let the awaiting continuation
@@ -367,7 +422,8 @@ internal static class SelfTestRunner
         {
             var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
             SynchronizationContext.SetSynchronizationContext(context);
-            new ReactorApplication();
+            var app = new ReactorApplication();
+            app.UnhandledException += (_, e) => WriteUnhandledException(e);
             var dispatcher = DispatcherQueue.GetForCurrentThread();
 
             var window = new Window { Title = "Reactor Self-Test" };
@@ -389,6 +445,7 @@ internal static class SelfTestRunner
                     // a pattern naming a fixture this tier doesn't run is still a valid
                     // pattern, not a stale one.
                     ValidateDefaultSkipPatterns(allFixtures);
+                    SelfTestShard.ValidatePinnedFixtures(allFixtures);
 
                     // The tier's corpus, not the registry's. A fixture declared for the other
                     // tier is structurally unable to assert here, so it is not run at all —
@@ -396,15 +453,19 @@ internal static class SelfTestRunner
                     // run's skip inventory on every run (issue #1154).
                     var tierFixtures = SelfTestFixtureRegistry.FixturesForCurrentTier;
 
+                    // Shard first, then filter, so a fixture's shard never depends on the filter.
+                    var shardFixtures = Shard is { } shard ? shard.Select(tierFixtures) : tierFixtures;
                     var fixtures = Filter is not null
-                        ? tierFixtures.Where(f => f.Contains(Filter, StringComparison.OrdinalIgnoreCase)).ToArray()
-                        : tierFixtures;
+                        ? shardFixtures.Where(f => f.Contains(Filter, StringComparison.OrdinalIgnoreCase)).ToArray()
+                        : shardFixtures;
                     harness.SetupTitleBar(fixtures.Length);
                     window.Activate();
                     await Harness.Render(); // wait for initial layout
 
                     Console.WriteLine($"TAP version 14");
                     Console.WriteLine($"1..{fixtures.Length}");
+                    if (Shard is { } runShard)
+                        Console.WriteLine($"{SelfTestShard.Marker}{runShard}: {shardFixtures.Length} of {tierFixtures.Length} fixtures");
 
                     // Suite clock. The whole run shares one process budget in the
                     // MSTest wrapper (SelfTestBatch.SelfTestTimeoutMs), and when it
@@ -537,6 +598,11 @@ internal static class SelfTestRunner
                         // its dispatcher-bound timeout fired) so the watchdog
                         // doesn't blame this fixture for an inter-fixture gap.
                         Volatile.Write(ref _currentFixture, null);
+                        // A hot-reload fixture (HotReloadService.UpdateApplication) makes the
+                        // source map's static names and hooks unknown for the rest of the
+                        // process, as in a real app. Fixtures are independent: each starts
+                        // from the compiled tables.
+                        global::Microsoft.UI.Reactor.Diagnostics.ReactorSourceMap.ResetHotReloadInvalidationForTests();
 
                         // Three outcomes, not two (issue #1061). A fixture that ran to completion
                         // having emitted only H.Skip directives asserted NOTHING, yet it produces

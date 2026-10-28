@@ -2,6 +2,7 @@ using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Hosting.Persistence;
 using Microsoft.UI.Reactor.Navigation;
+using Microsoft.UI.Xaml;
 using static Microsoft.UI.Reactor.Factories;
 
 // <snippet:run>
@@ -450,6 +451,33 @@ static class TallTitleBarSpec
     // </snippet:title-bar-height-spec>
 }
 
+class ThemedCaptionWindow : Component
+{
+    public override Element Render()
+    {
+        var (isDark, setIsDark) = UseState(false);
+
+        // <snippet:title-bar-theme>
+        var titleBar = TitleBar("My app")
+            .PreferredTheme(isDark ? WindowTitleBarTheme.Dark : WindowTitleBarTheme.Light);
+
+        return Border(VStack(titleBar, ToggleSwitch(isDark, setIsDark, header: "Dark mode")))
+            .RequestedTheme(isDark ? ElementTheme.Dark : ElementTheme.Light);
+        // </snippet:title-bar-theme>
+    }
+}
+
+static class ThemedCaptionSpec
+{
+    // <snippet:title-bar-theme-spec>
+    public static WindowSpec Spec { get; } = new()
+    {
+        Title = "My app",
+        TitleBarTheme = WindowTitleBarTheme.Dark,
+    };
+    // </snippet:title-bar-theme-spec>
+}
+
 // <snippet:title-bar-tall-legacy>
 class LegacyTallTitleBar : Component
 {
@@ -493,6 +521,15 @@ class TaskbarDemo : Component
 static class AppJumpList
 {
     // <snippet:jump-list>
+    // In a real app, load this list from the app's tracked destinations.
+    private static readonly List<JumpListItem> Destinations = [
+        JumpListItem.ForUri("New document", "contoso://new"),
+        JumpListItem.ForUri("Open dashboard", "contoso://dashboard",
+            description: "Jump straight to the dashboard"),
+        new JumpListItem("Report a bug", "contoso://bug",
+            Kind: JumpListItemKind.Custom, GroupCategory: "Help"),
+    ];
+
     // Unpackaged apps must set an AppUserModelId once, before the first
     // UpdateAsync — the shell has no other stable identity to hang the
     // jump list off. Packaged apps inherit it from the manifest.
@@ -501,14 +538,19 @@ static class AppJumpList
         JumpList.AppUserModelId = "Contoso.Reactor.Demo";
         JumpList.ShowRecent = true;
 
-        await JumpList.UpdateAsync([
-            JumpListItem.ForUri("New document", "contoso://new"),
-            JumpListItem.ForUri("Open dashboard", "contoso://dashboard",
-                description: "Jump straight to the dashboard"),
-            new JumpListItem("Report a bug", "contoso://bug",
-                Kind: JumpListItemKind.Custom, GroupCategory: "Help"),
-        ]);
+        var removed = await JumpList.GetRemovedArgumentsAsync();
+        PruneDestinations(removed);
+        removed = await JumpList.UpdateAsync(Destinations);
+        // Also process removals made after the query. A successful update
+        // clears the OS records, even for entries absent from this batch.
+        PruneDestinations(removed);
+        // Persist the updated tracked destinations in your app's data store.
+        // New user activity can explicitly add an eligible destination again.
     }
+
+    private static void PruneDestinations(IReadOnlyList<string> removed) =>
+        Destinations.RemoveAll(item => item.Kind != JumpListItemKind.Separator
+            && removed.Contains(item.Arguments, StringComparer.Ordinal));
 
     // Entries come back as a plain process re-launch. Resolve the argument
     // string through the same DeepLinkMap the app already uses for routes;
@@ -548,19 +590,37 @@ class PickerDemo : Component
     public override Element Render()
     {
         // <snippet:pickers>
-        // Both helpers return null when the user cancels the dialog.
-        var pickFile = UseFilePickerAsync;
-        var pickFolder = UseFolderPickerAsync;
-
-        return Button("Open...", async () =>
-        {
-            var file = await pickFile(new FilePickerOptions(
-                FileTypeFilter: [".txt", ".md"]));
-            if (file is null) return;
-
-            var folder = await pickFolder(new FolderPickerOptions());
-            if (folder is null) return;
-        });
+        // Pickers are not hooks: call them directly from UI-thread event handlers.
+        return VStack(
+            Button("Open one...", async () =>
+            {
+                var file = await PickFileAsync(new FilePickerOptions(FileTypeFilter: [".txt", ".md"]));
+                if (file is null) return; // User cancelled.
+                var text = await File.ReadAllTextAsync(file.Path);
+            }),
+            Button("Open files...", async () =>
+            {
+                var files = await PickMultipleFilesAsync(new FilePickerOptions
+                {
+                    Title = "Choose notes",
+                    FileTypeChoices = [new("Notes", [".txt", ".md"]), new("JSON", [".json"])],
+                });
+                if (files.Count == 0) return; // User cancelled.
+            }),
+            Button("Select folders...", async () =>
+            {
+                var folders = await PickMultipleFoldersAsync(new FolderPickerOptions());
+                if (folders.Count == 0) return;
+            }),
+            Button("Save as...", async () =>
+            {
+                var target = await PickSaveFileAsync(new SaveFilePickerOptions(
+                    [new("Text", [".txt"]), new("Markdown", [".md"])],
+                    SuggestedFileName: "report"));
+                if (target is null) return;
+                // Selecting a target is not a save: write the content yourself.
+                await File.WriteAllTextAsync(target.Path, "report body");
+            }));
         // </snippet:pickers>
     }
 }

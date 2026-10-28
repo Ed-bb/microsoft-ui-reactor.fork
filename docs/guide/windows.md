@@ -50,7 +50,15 @@ Caveats:
   keeps closing a transient floating window from firing
   `OnPrimaryWindowClosed` and exiting the app.
 - `UseWindow()` returns the owning `ReactorWindow` inside a window component and
-  `null` outside one (for example tray flyouts).
+  `null` outside one (for example tray flyouts and `ReactorHostControl` embeds).
+  The owner is the window whose host renders the component, including nested
+  components and virtualized rows, even while another window is the most
+  recently opened or rendered one. The other window hooks (`UseDpi`,
+  `UseWindowState`, `UseIsActive`, `UseClosingGuard`, …) resolve the same window
+  and return their "outside a window" values when there is none; there is no
+  fallback to another open window. `ReactorHostControl` content that needs its
+  hosting window can pass it explicitly (`UseWindowSize(window)`,
+  `UseBreakpoint(window, minWidth)`) or read `XamlRoot.RasterizationScale` for DPI.
 
 ## Sizing & resizing
 
@@ -349,6 +357,44 @@ opt-out for a deliberately bare title bar on an app that ships an icon.
 > rendered no icon. An existing app that ships a window icon — or an
 > `Assets\AppIcon.ico` — and deliberately wanted a bare title bar should add
 > `.NoIcon()` to keep that. Apps that set `.Icon(...)` explicitly are unaffected.
+
+### Caption button theme
+
+The system caption buttons (minimize, maximize, close) are window chrome, and WinUI does
+not carry an element's `RequestedTheme` through to them: an app that themes its content
+opposite to the system keeps system-themed buttons over its own title bar. Declare the
+matching caption theme with `.PreferredTheme(...)`:
+
+```csharp
+var titleBar = TitleBar("My app")
+    .PreferredTheme(isDark ? WindowTitleBarTheme.Dark : WindowTitleBarTheme.Light);
+
+return Border(VStack(titleBar, ToggleSwitch(isDark, setIsDark, header: "Dark mode")))
+    .RequestedTheme(isDark ? ElementTheme.Dark : ElementTheme.Light);
+```
+
+This writes `AppWindow.TitleBar.PreferredTheme` on mount and whenever the value changes.
+No effect is needed. It is opt-in, like WinUI: without a declaration Reactor
+never touches the caption theme, and a value you set on `AppWindow.TitleBar` yourself is
+left alone. Removing the declaration, or unmounting the title bar, restores the value the
+caption had before Reactor first applied one — the platform default, or whatever the app
+had set.
+
+The same knob exists on the spec, for windows without a `TitleBar(...)` element. It wins
+over the element's declaration when both are set, and — unlike the caption height — does
+not require content extension:
+
+```csharp
+public static WindowSpec Spec { get; } = new()
+{
+    Title = "My app",
+    TitleBarTheme = WindowTitleBarTheme.Dark,
+};
+```
+
+| API | Values |
+| --- | --- |
+| `WindowTitleBarTheme` | `Legacy`, `UseDefaultAppMode`, `Light`, `Dark` |
 
 ### Tall title bar
 
@@ -728,6 +774,15 @@ startup callback. The recommended convention is to put a deep-link URI in
 a [`DeepLinkMap<TRoute>`](navigation.md):
 
 ```csharp
+// In a real app, load this list from the app's tracked destinations.
+private static readonly List<JumpListItem> Destinations = [
+    JumpListItem.ForUri("New document", "contoso://new"),
+    JumpListItem.ForUri("Open dashboard", "contoso://dashboard",
+        description: "Jump straight to the dashboard"),
+    new JumpListItem("Report a bug", "contoso://bug",
+        Kind: JumpListItemKind.Custom, GroupCategory: "Help"),
+];
+
 // Unpackaged apps must set an AppUserModelId once, before the first
 // UpdateAsync — the shell has no other stable identity to hang the
 // jump list off. Packaged apps inherit it from the manifest.
@@ -736,14 +791,19 @@ public static async Task PublishAsync()
     JumpList.AppUserModelId = "Contoso.Reactor.Demo";
     JumpList.ShowRecent = true;
 
-    await JumpList.UpdateAsync([
-        JumpListItem.ForUri("New document", "contoso://new"),
-        JumpListItem.ForUri("Open dashboard", "contoso://dashboard",
-            description: "Jump straight to the dashboard"),
-        new JumpListItem("Report a bug", "contoso://bug",
-            Kind: JumpListItemKind.Custom, GroupCategory: "Help"),
-    ]);
+    var removed = await JumpList.GetRemovedArgumentsAsync();
+    PruneDestinations(removed);
+    removed = await JumpList.UpdateAsync(Destinations);
+    // Also process removals made after the query. A successful update
+    // clears the OS records, even for entries absent from this batch.
+    PruneDestinations(removed);
+    // Persist the updated tracked destinations in your app's data store.
+    // New user activity can explicitly add an eligible destination again.
 }
+
+private static void PruneDestinations(IReadOnlyList<string> removed) =>
+    Destinations.RemoveAll(item => item.Kind != JumpListItemKind.Separator
+        && removed.Contains(item.Arguments, StringComparer.Ordinal));
 
 // Entries come back as a plain process re-launch. Resolve the argument
 // string through the same DeepLinkMap the app already uses for routes;
@@ -766,8 +826,9 @@ public static void Start(DeepLinkMap<string> routes) =>
 | --- | --- |
 | `JumpList.AppUserModelId` | Shell identity. Required before the first `UpdateAsync` on unpackaged apps; ignored under MSIX. |
 | `JumpList.ShowRecent` / `ShowFrequent` | Toggle the OS-managed categories. Contents are shell-owned. |
-| `JumpList.UpdateAsync(items)` | Replace the whole list. UI thread only. |
-| `JumpList.ClearAsync()` | Remove the app's entries. |
+| `JumpList.UpdateAsync(items)` | Replace the whole list and return user removals observed in that transaction. UI thread only. |
+| `JumpList.ClearAsync()` | Remove the app's entries and return the transaction's observed removals. |
+| `JumpList.GetRemovedArgumentsAsync()` | Read user-removed entries' argument strings without updating the list. UI thread only. |
 | `JumpListItem.ForUri(...)` | Deep-link entry — `Arguments` is the URI. |
 | `JumpListItem.ForCommandLine(...)` | argv-style entry; escapes each value for `CommandLineToArgvW`. |
 | `JumpListItemKind` | `Task`, `Custom` (needs `GroupCategory`), `Separator` |
@@ -787,6 +848,23 @@ Caveats:
 - `UpdateAsync` validates the whole batch before touching the shell, so one
   bad entry never leaves a half-populated list behind. Non-separator entries
   must have a non-empty `Title`.
+- **Respect user removals.** Before updating, query `GetRemovedArgumentsAsync()`
+  and prune matching arguments from the app's destination tracking data (not the
+  underlying files). Also retain the arguments returned by `UpdateAsync` or
+  `ClearAsync`: they capture removals observed inside that transaction, including
+  removals arriving after the earlier query and removals absent from the new batch.
+  A successful update clears Windows' removal records. Without updating its own
+  tracking data, an app can reintroduce a removed destination on its next refresh.
+  Only offer it again after new user activity; compare arguments ordinally.
+  Results report observations, not commit success; logged shell HRESULT failures
+  keep the existing non-throwing behavior. The return type is now
+  `Task<IReadOnlyList<string>>`; await-only source callers continue to compile,
+  but existing consumers must rebuild their binaries.
+- On unpackaged apps, removal queries cover shell links targeting the current
+  executable, which is the shape this wrapper creates, not `IShellItem` file
+  destinations or links to other executables. Removal filtering applies to
+  custom categories, not the non-removable User Tasks group. The packaged path
+  uses each loaded item's `RemovedByUser` flag, including ungrouped entries.
 
 ## Displays
 
@@ -817,31 +895,97 @@ Caveats:
 
 ## Pickers
 
-Picker hooks create WinUI storage pickers and initialize them with the owning
-window HWND, so the picker is modal to the correct window without app code doing
-HWND interop.
+Picker methods create `Microsoft.Windows.Storage.Pickers` dialogs owned by the
+component's window, so each dialog is modal to the right window without any
+HWND interop. They also work in elevated (administrator) apps, unlike the UWP
+`Windows.Storage.Pickers` dialogs. `Component` and `RenderContext` expose the
+same operations:
+
+| Method | Options | Returns | Cancellation |
+| --- | --- | --- | --- |
+| `PickFileAsync` | `FilePickerOptions` | `PickFileResult?` | `null` |
+| `PickMultipleFilesAsync` | `FilePickerOptions` | `IReadOnlyList<PickFileResult>` | Empty list |
+| `PickFolderAsync` | `FolderPickerOptions` | `PickFolderResult?` | `null` |
+| `PickMultipleFoldersAsync` | `FolderPickerOptions` | `IReadOnlyList<PickFolderResult>` | Empty list |
+| `PickSaveFileAsync` | `SaveFilePickerOptions` | `PickFileResult?` | `null` |
+
+Each result exposes the chosen `Path`. Open the file with `System.IO`, or with
+`StorageFile.GetFileFromPathAsync` when you need a `StorageFile`.
+
+All three option records share a suggested start location, commit-button text,
+a dialog `Title`, a `SettingsIdentifier` that Windows uses to remember dialog state,
+`SuggestedFolder` (always open there), and `SuggestedStartFolder` (open there until
+Windows remembers a location). Both folder properties take absolute paths. Open
+and folder options add an optional `ViewMode`. File options add:
+
+- `FileTypeFilter`: extensions such as `".txt"`. Null or empty shows all files.
+- `FileTypeChoices`: an ordered list of `FileTypeChoice(label, extensions)` groups.
+  When non-empty, it replaces `FileTypeFilter`.
+- `InitialFileTypeIndex`: the entry selected first. Null lets Windows choose.
+
+Save options require at least one `FileTypeChoice`. The list order is the order
+Windows shows, and the first entry is the default unless `InitialFileTypeIndex`
+says otherwise. Labels must be unique and non-blank, and every choice needs at
+least one extension. Save options also take a suggested file name,
+`DefaultFileExtension`, and `ShowOverwritePrompt` (default `true`). The save
+method only selects a target path; the caller must create and write the file.
+
+Both `Windows.Storage.Pickers` and `Microsoft.Windows.Storage.Pickers` define
+`PickerLocationId` and `PickerViewMode`, so import only the
+`Microsoft.Windows.Storage.Pickers` namespace in files that build picker options.
 
 ```csharp
-// Both helpers return null when the user cancels the dialog.
-var pickFile = UseFilePickerAsync;
-var pickFolder = UseFolderPickerAsync;
-
-return Button("Open...", async () =>
-{
-    var file = await pickFile(new FilePickerOptions(
-        FileTypeFilter: [".txt", ".md"]));
-    if (file is null) return;
-
-    var folder = await pickFolder(new FolderPickerOptions());
-    if (folder is null) return;
-});
+// Pickers are not hooks: call them directly from UI-thread event handlers.
+return VStack(
+    Button("Open one...", async () =>
+    {
+        var file = await PickFileAsync(new FilePickerOptions(FileTypeFilter: [".txt", ".md"]));
+        if (file is null) return; // User cancelled.
+        var text = await File.ReadAllTextAsync(file.Path);
+    }),
+    Button("Open files...", async () =>
+    {
+        var files = await PickMultipleFilesAsync(new FilePickerOptions
+        {
+            Title = "Choose notes",
+            FileTypeChoices = [new("Notes", [".txt", ".md"]), new("JSON", [".json"])],
+        });
+        if (files.Count == 0) return; // User cancelled.
+    }),
+    Button("Select folders...", async () =>
+    {
+        var folders = await PickMultipleFoldersAsync(new FolderPickerOptions());
+        if (folders.Count == 0) return;
+    }),
+    Button("Save as...", async () =>
+    {
+        var target = await PickSaveFileAsync(new SaveFilePickerOptions(
+            [new("Text", [".txt"]), new("Markdown", [".md"])],
+            SuggestedFileName: "report"));
+        if (target is null) return;
+        // Selecting a target is not a save: write the content yourself.
+        await File.WriteAllTextAsync(target.Path, "report body");
+    }));
 ```
 
 Caveats:
 
-- Picker hooks must be called on the owning window's UI thread.
-- Reactor never accepts arbitrary HWNDs; it always uses `UseWindow().NativeWindow`.
-- Tests should inject the picker service rather than opening native dialogs.
+- These methods are not hooks: they reserve no hook slot and open a dialog when
+  called. Call them from UI-thread event handlers, not during `Render()` or in
+  `Task.Run`. Their `Pick*` names keep the hook-rules analyzer quiet in handlers.
+- The owner is the window whose host rendered the component (including nested and
+  virtualized-row components), not whichever window is active when the handler
+  runs. That is the `ReactorWindow`, the `Window` a `ReactorHost` was constructed
+  over, or for `ReactorHostControl` the window the control is loaded in when the
+  method is called (a reparented control follows its new window). Once the
+  component unmounts (including when its root is replaced or its
+  `ReactorHostControl` is disposed) or its window closes, the call throws
+  `InvalidOperationException`. It also throws while a `ReactorHostControl` is
+  unloaded (not in any window).
+- Option validation (missing or duplicate file-type choices) throws `ArgumentException`
+  before any dialog opens. Windows validates extension syntax and folder paths.
+- Picker errors propagate to the caller; cancellation is not an error.
+- Framework tests use an internal picker-service seam instead of opening modal dialogs.
 
 ## WPF / UWP migration map
 
@@ -861,7 +1005,7 @@ fields that were removed and what replaced them.
 | Manual settings persistence | `.WithPersistence(id)` | Opt-in, one line. |
 | `TaskbarItemInfo` | `TaskbarItem` | Facade over progress, overlay, description, thumb buttons. |
 | WPF `JumpTask` / `JumpList` | `JumpListItem` / `JumpList` | Process-wide, not per-window; `UpdateAsync` replaces the whole list. |
-| UWP/WinUI picker HWND setup | `UseFilePickerAsync` / `UseFolderPickerAsync` | Owning HWND is wired automatically. |
+| UWP/WinUI picker HWND setup | `PickFileAsync`, `PickMultipleFilesAsync`, `PickFolderAsync`, `PickMultipleFoldersAsync`, `PickSaveFileAsync` | Owner window is wired automatically; results are paths. |
 
 ## Finding and enumerating windows
 

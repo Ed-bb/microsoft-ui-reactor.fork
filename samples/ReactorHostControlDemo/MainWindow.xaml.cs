@@ -13,12 +13,11 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         AppWindow.Resize(new global::Windows.Graphics.SizeInt32(900, 600));
 
-        // Mount a Component class into the left panel
-        var counterHost = new ReactorHostControl();
-        counterHost.Mount(new CounterDemo());
-        CounterPanel.Child = counterHost;
+        // The counter panel is declared in MainWindow.xaml:
+        //   <reactor:ReactorHostControl ComponentType="local:CounterDemo" />
+        // It creates and mounts CounterDemo when it loads.
 
-        // Mount a function component into the right panel
+        // Mount a function component into the right panel from code
         var todoHost = new ReactorHostControl();
         todoHost.Mount(ctx =>
         {
@@ -48,9 +47,9 @@ public sealed partial class MainWindow : Window
                 ).Margin(16, 8, 16, 16),
 
                 items.Count == 0
-                    ? TextBlock("All done!").Foreground("#888").HAlign(HorizontalAlignment.Center).Margin(16)
+                    ? TextBlock("All done!").Foreground("#888888").HAlign(HorizontalAlignment.Center).Margin(16)
                     : TextBlock($"{items.Count} item{(items.Count == 1 ? "" : "s")} remaining")
-                        .Foreground("#888").HAlign(HorizontalAlignment.Center).Margin(0, 0, 0, 16)
+                        .Foreground("#888888").HAlign(HorizontalAlignment.Center).Margin(0, 0, 0, 16)
             );
         });
         TodoPanel.Child = todoHost;

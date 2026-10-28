@@ -57,11 +57,13 @@ REACTOR_MOD_003 | Reactor.Modifier | Warning | NoOpModifierAnalyzer - Generic co
 REACTOR_MEDIA_001 | Reactor.Layout | Info | UnsizedWebViewInStackAnalyzer - WebView2 is a direct child of an auto-layout stack (HStack/VStack/FlexRow/FlexColumn) without explicit .Width/.Height
 REACTOR_ANIM_003 | Reactor.Animation | Warning | AnimationScopeAsyncAnalyzer - async lambda to WithAnimation loses the ThreadStatic scope after await
 REACTOR_LIFECYCLE_002 | Reactor.Lifecycle | Warning | EffectCleanupAnalyzer - UseEffect(Action) allocates a timer/subscription/event with no returned cleanup
+REACTOR_LIFECYCLE_003 | Reactor.Lifecycle | Warning | ReconcilerUpdateChildAnalyzer - Reconciler.UpdateChild neither checks the child's element type nor unmounts a control it replaces; use Reconcile (ships a fix for the common shape)
 REACTOR_MEMO_001 | Reactor.Performance | Info | MemoWrapperModifierAnalyzer - Modifiers on a keyed Memo(key,factory) wrapper opt the row out of the recycle cache
 REACTOR_DYM_001 | Reactor.DidYouMean | Warning | NonInvocableMemberParensAnalyzer - Reactor property/field invoked like a method (e.g. GridSize.Auto()); remove the parentheses
 REACTOR_DYM_002 | Reactor.DidYouMean | Warning | ThemeBackgroundSuffixAnalyzer - Invented Theme.*Background token (e.g. Theme.AppBackground); use Theme.SolidBackground (Theme.LayerBackground -> Theme.LayerFill)
 REACTOR_DYM_003 | Reactor.DidYouMean | Warning | FuzzyFactoryNameAnalyzer - Mistyped Reactor factory name in call position (e.g. Buton(...)); did-you-mean the closest factory
 REACTOR_DYM_004 | Reactor.DidYouMean | Warning | MissingFactoryArgumentAnalyzer - Reactor factory called with too few arguments (CS7036); suggests the full parameter shape (single unique overload only)
 REACTOR_DYM_005 | Reactor.DidYouMean | Warning | StringForElementArgumentAnalyzer - String passed where a Reactor Element is expected (CS1503); wrap it in a text factory (e.g. TextBlock)
+REACTOR_DYM_006 | Reactor.DidYouMean | Warning | ColorStringLiteralAnalyzer - Constant color string BrushHelper cannot parse (renders gray); suggests hex, #RRGGBB expansion, or new FontFamily(...) for a *FontFamily resource key
 REACTOR_ITEMS_002 | Reactor.Collections | Warning | ItemsViewContainerRootAnalyzer - ItemsView viewBuilder returns a non-ItemContainer root (mount-time InvalidOperationException); wrap it with ItemContainer(...)
 REACTOR_ICON_001 | Reactor.Windowing | Warning | WindowIconSurfaceAnalyzer - WindowIcon source kind the target surface silently skips (FromResource on tray/overlay/thumbnail, which need an HICON; FromBytes/FromRgba on the window caption or a jump list, which need a path or Uri); only fires when the kind is provably known at the use site

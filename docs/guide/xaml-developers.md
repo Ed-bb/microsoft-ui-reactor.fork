@@ -422,13 +422,54 @@ when you're migrating an existing view model. New code uses hooks.
 ### Writing XAML at all
 
 Reactor does not host a XAML loader. There is no `Application.LoadComponent`
-equivalent, no `xmlns:reactor`, no `*.reactor.xml` markup. Apps that
+equivalent, no markup for Reactor *elements*, no `*.reactor.xml` files. Apps that
 need part of the screen in XAML use a WinUI `Page` as the host and
 embed Reactor via [winforms-interop](winforms-interop.md) or
-`ReactorHostControl`; everything inside that host is C#. If a
+`ReactorHostControl`; everything inside that host is C#. The host itself is an
+ordinary WinUI control, so it can be declared in the page's markup:
+
+```xml
+<Page xmlns:reactor="using:Microsoft.UI.Reactor.Hosting"
+      xmlns:local="using:MyApp">
+    <reactor:ReactorHostControl ComponentType="local:StatsCard" />
+</Page>
+```
+
+`ComponentType` names a component with a public parameterless constructor; for
+a root that needs constructor arguments or view-model state, declare the host
+with an `x:Name` and call `Mount(...)` from code-behind. `ComponentType` only
+works for a type named in markup (that is what makes the XAML compiler generate
+its trim-safe activator); set from code, the host shows an error explaining this
+in place of the root, so use `ComponentFactory` or `Mount(...)` there. If a
 contractor's "Reactor XAML compiler" appears in your search results,
 it doesn't exist — the framework's design eliminates the second
 authoring language deliberately.
+
+The other direction — an existing XAML `Page` or control inside a Reactor tree — uses
+`XamlPage(...)` and `XamlHost(...)`:
+
+```csharp
+class XamlInteropExample : Component
+{
+    public override Element Render()
+    {
+        var (count, _) = UseState(0);
+
+        return VStack(8,
+            XamlPage(typeof(LegacySettingsPage), parameter: "general"),   // a Frame navigated to the page
+            XamlHost(() => new MyUserControl(), c => ((MyUserControl)c).Value = count,
+                     typeKey: "MyUserControl")                            // any FrameworkElement
+        );
+    }
+}
+```
+
+`XamlPage` re-navigates in place when the page type or parameter changes. `XamlHost`'s
+factory runs once on mount and its updater after creation and on every render; give
+unrelated hosts different `typeKey`s so one is never updated in place into another.
+Reactor does not manage the hosted control's children. Prefer the factories to the
+`XamlPageElement` / `XamlHostElement` constructors: they record the call site, so
+inspectors can map the hosted control back to your code.
 
 ## Tips
 

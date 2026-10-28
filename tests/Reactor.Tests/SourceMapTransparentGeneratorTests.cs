@@ -56,8 +56,26 @@ public sealed class SourceMapTransparentGeneratorTests
                 public static implicit operator Element(string text) => new TextBlockElement(text);
             }
             public record TextBlockElement(string Content) : Element;
+
+            // Hook surface for the static-info pass (declared names / hook names).
+            public sealed class RenderContext
+            {
+                public (T Value, global::System.Action<T> Set) UseState<T>(T initial) => (initial, _ => { });
+                public T UseRef<T>(T initial) => initial;
+                public void UseEffect(global::System.Action effect, params object[] dependencies) { }
+                public bool UseIsActive() => true;
+                public (object Ref, global::System.Action RequestFocus) UseElementFocus() => (new object(), () => { });
+            }
+            public abstract class Component
+            {
+                public abstract Element Render();
+                public RenderContext Context { get; } = new();
+                protected (T Value, global::System.Action<T> Set) UseState<T>(T initial) => (initial, _ => { });
+                protected T UseRef<T>(T initial) => initial;
+                protected void UseEffect(global::System.Action effect, params object[] dependencies) { }
+            }
             public record EmptyElement : Element;
-            public readonly record struct SourceLocation(string FilePath, int LineNumber);
+            public readonly record struct SourceLocation(string FilePath, int LineNumber, int ColumnNumber);
         }
         namespace Microsoft.UI.Reactor
         {
@@ -66,6 +84,11 @@ public sealed class SourceMapTransparentGeneratorTests
                 public static Microsoft.UI.Reactor.Core.TextBlockElement TextBlock(string content)
                     => new(content);
 
+                public static Microsoft.UI.Reactor.Core.Element Memo(
+                    global::System.Func<Microsoft.UI.Reactor.Core.RenderContext, Microsoft.UI.Reactor.Core.Element> render,
+                    params object?[] dependencies)
+                    => render(new Microsoft.UI.Reactor.Core.RenderContext());
+
                 public static Microsoft.UI.Reactor.Core.Element VStack(
                     params Microsoft.UI.Reactor.Core.Element?[] children)
                     => children.Length > 0 && children[0] is { } first
@@ -73,15 +96,65 @@ public sealed class SourceMapTransparentGeneratorTests
                         : new Microsoft.UI.Reactor.Core.EmptyElement();
             }
         }
+        namespace Microsoft.UI.Reactor.Hooks
+        {
+            // A component-extension hook: takes the Component, forwards to its RenderContext.
+            public static class UseElementFocusExtensions
+            {
+                public static (object Ref, global::System.Action RequestFocus) UseElementFocus(
+                    this Microsoft.UI.Reactor.Core.Component component)
+                    => component.Context.UseElementFocus();
+            }
+
+            // A Reactor hook on a type of its own whose name this generator counts as one
+            // slot: only "declared in Reactor" makes it a single slot, not its body.
+            public static class UseMemoExtensions
+            {
+                public static T UseMemo<T>(this Microsoft.UI.Reactor.Core.Component component, global::System.Func<T> factory)
+                    => factory();
+            }
+
+            // Reactor's typed element-ref hook: one UseMemo slot, on either overload.
+            public static class UseElementRefExtensions
+            {
+                public static T UseElementRef<T>(this Microsoft.UI.Reactor.Core.RenderContext ctx) where T : new()
+                    => ctx.UseRef(new T());
+                public static T UseElementRef<T>(this Microsoft.UI.Reactor.Core.Component component) where T : new()
+                    => component.Context.UseElementRef<T>();
+            }
+        }
         namespace Microsoft.UI.Reactor.Diagnostics
         {
             [global::System.AttributeUsage(global::System.AttributeTargets.Method, Inherited = false)]
             public sealed class ReactorSourceTransparentAttribute : global::System.Attribute { }
-            public static class ReactorSourceMap { public static bool Enabled { get; set; } }
+            public static class ReactorSourceMap
+            {
+                public static bool Enabled { get; set; }
+                public static void RegisterStaticInfo(global::System.Reflection.Assembly assembly, global::System.Action<ReactorStaticInfoBuilder> fill) { }
+                public static object? EnterRootMountSite(string filePath, int lineNumber, int columnNumber) => null;
+                public static void ExitRootMountSite(object? token) { }
+            }
+            public sealed class ReactorStaticInfoBuilder
+            {
+                public void Name(string filePath, int lineNumber, int columnNumber, string name) { }
+                public void ComponentHooks(string componentTypeFullName, string hooks) { }
+                public void RenderFunctionHooks(string filePath, int lineNumber, int columnNumber, string hooks) { }
+                public void Roots(string projectDirectory, string? rootDirectory) { }
+                public void Source(string filePath, string fingerprint) { }
+            }
         }
         """;
 
     private static readonly ImmutableArray<MetadataReference> s_references = BuildReferences();
+
+    // The real Reactor assemblies are on the test host's TPA. In-source stand-ins win over
+    // them (CS0436, a warning), but a stand-in compiled as its own assembly is ambiguous
+    // with them (CS0433), so the project-reference shape leaves them out.
+    private static readonly ImmutableArray<MetadataReference> s_referencesWithoutReactor = s_references
+        .Where(static r => global::System.IO.Path.GetFileName(r.Display) is not { } name
+            || !(name.StartsWith("Reactor", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("Microsoft.UI.Reactor", StringComparison.OrdinalIgnoreCase)))
+        .ToImmutableArray();
 
     private static ImmutableArray<MetadataReference> BuildReferences()
     {
@@ -104,26 +177,54 @@ public sealed class SourceMapTransparentGeneratorTests
     /// forms differ, a `params` slot written with the wrong type — shows up as a compile
     /// error in the emitted file rather than as a wrong string in it.</para>
     /// </summary>
-    private static (ImmutableArray<Diagnostic> Diagnostics, string GeneratedSource) Run(
-        string userCode, bool enabled = true)
+    /// <param name="surface">Where the stand-in surface lives. With anything but
+    /// <see cref="SurfaceShape.InSource"/> it is its own assembly, referenced from the
+    /// probe — see <see cref="SurfaceShape"/>.</param>
+    /// <param name="librarySource">Optional extra project, compiled against the surface and
+    /// referenced the same way (requires a referenced <paramref name="surface"/>).</param>
+    internal static (ImmutableArray<Diagnostic> Diagnostics, string GeneratedSource) Run(
+        string userCode,
+        bool enabled = true,
+        IReadOnlyDictionary<string, string>? buildProperties = null,
+        SurfaceShape surface = SurfaceShape.InSource,
+        string? librarySource = null)
     {
+        Assert.True(librarySource is null || surface != SurfaceShape.InSource, "a library project needs a referenced surface");
+
         // Interceptors are opt-in per namespace; without this the emitted
         // [InterceptsLocation] attributes are CS9137 and the post-generation check below
         // would fail for a reason that has nothing to do with the code under test.
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview)
             .WithFeatures([new KeyValuePair<string, string>(
                 "InterceptorsNamespaces", SourceMapInterceptorGenerator.InterceptorNamespace)]);
+        var compilationOptions = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
+            nullableContextOptions: NullableContextOptions.Enable);
 
-        var compilation = CSharpCompilation.Create(
-            "SourceMapDriverProbe",
-            new[]
+        var surfaceTree = CSharpSyntaxTree.ParseText(ReactorSurface, parseOptions, path: "Surface.cs");
+        var userTree = CSharpSyntaxTree.ParseText(userCode, parseOptions, path: "User.cs");
+        var references = s_references;
+        SyntaxTree[] trees;
+        if (surface != SurfaceShape.InSource)
+        {
+            var surfaceProject = CSharpCompilation.Create("Microsoft.UI.Reactor", [surfaceTree], s_referencesWithoutReactor, compilationOptions);
+            references = s_referencesWithoutReactor.Add(Reference(surfaceProject, "surface project", surface));
+            if (librarySource is not null)
             {
-                CSharpSyntaxTree.ParseText(ReactorSurface, parseOptions, path: "Surface.cs"),
-                CSharpSyntaxTree.ParseText(userCode, parseOptions, path: "User.cs"),
-            },
-            s_references,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
-                nullableContextOptions: NullableContextOptions.Enable));
+                var library = CSharpCompilation.Create(
+                    "SourceMapDriverLibrary",
+                    [CSharpSyntaxTree.ParseText(librarySource, parseOptions, path: "Library.cs")],
+                    references,
+                    compilationOptions);
+                references = references.Add(Reference(library, "library project", surface));
+            }
+            trees = [userTree];
+        }
+        else
+        {
+            trees = [surfaceTree, userTree];
+        }
+
+        var compilation = CSharpCompilation.Create("SourceMapDriverProbe", trees, references, compilationOptions);
 
         // The snippet must bind, or an "expected diagnostic missing" result would just be
         // measuring a broken probe. Binding errors are a test bug, not a product signal.
@@ -134,7 +235,7 @@ public sealed class SourceMapTransparentGeneratorTests
 
         var driver = CSharpGeneratorDriver.Create(
             [new SourceMapInterceptorGenerator().AsSourceGenerator()],
-            optionsProvider: new StubOptions(enabled),
+            optionsProvider: new StubOptions(enabled, buildProperties),
             parseOptions: parseOptions);
 
         driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(
@@ -150,6 +251,30 @@ public sealed class SourceMapTransparentGeneratorTests
 
         var generated = string.Concat(result.GeneratedTrees.Select(static t => t.ToString()));
         return (result.Diagnostics, generated);
+    }
+
+    private static MetadataReference Reference(CSharpCompilation project, string what, SurfaceShape shape)
+    {
+        var errors = project.GetDiagnostics().Where(static d => d.Severity == DiagnosticSeverity.Error).ToList();
+        Assert.True(errors.Count == 0, $"{what} failed to compile: " + string.Join("; ", errors));
+        if (shape == SurfaceShape.ProjectReference) return project.ToMetadataReference();
+        using var image = new global::System.IO.MemoryStream();
+        var emitted = project.Emit(image);
+        Assert.True(emitted.Success, $"{what} failed to emit: " + string.Join("; ", emitted.Diagnostics));
+        return MetadataReference.CreateFromImage(image.ToArray());
+    }
+
+    /// <summary>How the probe sees the Reactor stand-in surface (and any library project).</summary>
+    public enum SurfaceShape
+    {
+        /// <summary>Compiled into the probe itself (the default for every older test).</summary>
+        InSource,
+        /// <summary>A <see cref="CompilationReference"/>: a project reference in a workspace
+        /// (<c>dotnet watch</c>) compilation, whose symbols carry syntax from trees that are
+        /// not part of the probe's compilation.</summary>
+        ProjectReference,
+        /// <summary>An emitted assembly: what a command-line build sees, with no source.</summary>
+        MetadataReference,
     }
 
     /// <summary>
@@ -565,7 +690,8 @@ public sealed class SourceMapTransparentGeneratorTests
     {
         private readonly AnalyzerConfigOptions _global;
 
-        public StubOptions(bool enabled) => _global = new Options(enabled);
+        public StubOptions(bool enabled, IReadOnlyDictionary<string, string>? buildProperties = null)
+            => _global = new Options(enabled, buildProperties);
 
         public override AnalyzerConfigOptions GlobalOptions => _global;
 
@@ -578,13 +704,25 @@ public sealed class SourceMapTransparentGeneratorTests
             internal static readonly Options Empty = new(null);
 
             private readonly string? _reactorSourceMap;
+            private readonly IReadOnlyDictionary<string, string>? _buildProperties;
 
-            internal Options(bool enabled) => _reactorSourceMap = enabled ? "true" : "false";
+            internal Options(bool enabled, IReadOnlyDictionary<string, string>? buildProperties)
+            {
+                _reactorSourceMap = enabled ? "true" : "false";
+                _buildProperties = buildProperties;
+            }
 
             private Options(string? value) => _reactorSourceMap = value;
 
             public override bool TryGetValue(string key, out string value)
             {
+                if (_buildProperties is not null
+                    && key.StartsWith("build_property.", StringComparison.Ordinal)
+                    && _buildProperties.TryGetValue(key.Substring("build_property.".Length), out var property))
+                {
+                    value = property;
+                    return true;
+                }
                 if (key == "build_property.ReactorSourceMap" && _reactorSourceMap is not null)
                 {
                     value = _reactorSourceMap;

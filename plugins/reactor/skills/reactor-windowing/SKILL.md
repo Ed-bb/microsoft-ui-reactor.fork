@@ -1,6 +1,6 @@
 ---
 name: reactor-windowing
-description: "Reactor top-level windowing cookbook: WindowSpec, OpenWindow, draggable windows, borderless/tool windows, placement persistence, taskbar visibility, z-order, aspect ratio, SizeToContent, displays, taskbar integration, and picker HWND wiring."
+description: "Reactor top-level windowing cookbook: WindowSpec, OpenWindow, draggable windows, borderless/tool windows, placement persistence, taskbar visibility, z-order, aspect ratio, SizeToContent, displays, taskbar integration, and owner-window file/folder pickers."
 when_to_invoke:
   - "open a window"
   - "secondary window"
@@ -71,6 +71,11 @@ var drag = UseWindowDragMove();
 Button("Drag", drag);
 Border(customEditor).Drag(false); // opt out of background drag
 ```
+
+Window hooks (`UseWindow`, `UseWindowPosition`, `UseWindowDragMove`, `UseDpi`, `UseWindowState`,
+`UseIsActive`, `UseClosingGuard`, `UseWindowAspectRatio`, …) bind the window whose host renders the
+component, including nested components and virtualized rows, never "the most recently active window".
+In tray flyouts and `ReactorHostControl` embeds they return `null` / their outside-a-window values.
 
 ```csharp
 var spec = new WindowSpec { Title = "Shell" }
@@ -205,6 +210,22 @@ wins over the implied 48; `WindowSpec.TitleBarHeight` wins over the element.
 > content-extension flip and warns instead of throwing, so prefer this over
 > setting `PreferredHeightOption` from a `UseEffect`.
 
+### Caption button theme
+
+```csharp
+TitleBar("My App").PreferredTheme(isDark ? WindowTitleBarTheme.Dark : WindowTitleBarTheme.Light);
+new WindowSpec { TitleBarTheme = WindowTitleBarTheme.Dark };
+```
+
+WinUI does not carry an element's `RequestedTheme` to the system caption buttons
+(min/max/close), so a root themed opposite to the system keeps system-themed buttons.
+`.PreferredTheme(WindowTitleBarTheme)` (`Legacy` / `UseDefaultAppMode` / `Light` /
+`Dark`) writes `AppWindow.TitleBar.PreferredTheme` on mount and on change — no
+`UseEffect`. Opt-in: with nothing declared Reactor never writes the property, and
+removing a declaration restores the value the caption had before Reactor first applied one.
+`WindowSpec.TitleBarTheme` wins over the element. Unlike the height, it does not
+need a content-extended window.
+
 ### Custom title-bar content and drag regions
 
 `TitleBar(...)` accepts custom `Content`. Interactive controls are excluded from
@@ -241,12 +262,45 @@ taskbar.Progress.Value = 0.25;
 var displays = UseDisplays();
 var nearest = ReactorDisplay.NearestTo(window.Position.X, window.Position.Y);
 
-var file = await UseFilePickerAsync(new FilePickerOptions(FileTypeFilter: [".txt"]));
-var folder = await UseFolderPickerAsync(new FolderPickerOptions());
+// Pickers are not hooks: call them directly from UI-thread event handlers, never during Render.
+// using Microsoft.Windows.Storage.Pickers;  (not Windows.Storage.Pickers: both define PickerLocationId)
+return VStack(
+    Button("Open", async () => { var file = await PickFileAsync(new(FileTypeFilter: [".txt"])); if (file is null) return; var text = await File.ReadAllTextAsync(file.Path); }),
+    Button("Open multiple", async () => { var files = await PickMultipleFilesAsync(new() { FileTypeChoices = [new("Notes", [".txt", ".md"])] }); }),
+    Button("Folder", async () => { var folder = await PickFolderAsync(new()); }),
+    Button("Folders", async () => { var folders = await PickMultipleFoldersAsync(new()); }),
+    Button("Save", async () => { var target = await PickSaveFileAsync(new(
+        [new("Text", [".txt"]), new("Markdown", [".md"])], SuggestedFileName: "report"));
+        if (target is not null) await File.WriteAllTextAsync(target.Path, "body"); }));
 ```
 
-Picker hooks must run on the owning window's UI thread and use the owning HWND;
-there is no arbitrary HWND parameter.
+`PickFileAsync` / `PickMultipleFilesAsync` / `PickFolderAsync` / `PickMultipleFoldersAsync` / `PickSaveFileAsync`
+return `PickFileResult` / `PickFolderResult` (`Microsoft.Windows.Storage.Pickers`, exposing `.Path`); cancellation
+returns `null` or an empty list. The owner is the window whose host renders the component (not whichever window is
+active), the dialog works in elevated apps, and the call throws `InvalidOperationException` once the component has
+unmounted or its window has closed. Inside `ReactorHostControl` the owner is the window the control is loaded in
+when the method is called; an unloaded control throws. `FileTypeChoices` is an ordered
+`IReadOnlyList<FileTypeChoice>` whose order sets the default entry; labels
+must be unique. Options also take `Title`, `SuggestedFolder`, `SuggestedStartFolder`, `InitialFileTypeIndex`, and
+(save) `DefaultFileExtension` / `ShowOverwritePrompt`. There is no arbitrary HWND parameter.
+
+## Render errors
+
+Outside an `ErrorBoundary`, a render failure shows a built-in fallback with the
+full exception text. Replace it app-wide, per window, or per host; a host's own
+handler wins, and `null` on the window/host falls through to the app default:
+
+```csharp
+ReactorApp.DefaultRenderErrorHandler = e => TextBlock("Something went wrong.");
+ReactorApp.OpenWindow(spec with { RenderErrorHandler = e => SettingsErrorView(e) }, render);
+window.Host.RenderErrorHandler = e => { e.Propagate(); return null; }; // → OnUnhandledException
+```
+
+Return `null` to keep the built-in fallback. If the handler (or the element it
+returns) throws, Reactor shows a neutral message without exception details. The
+handler runs again each time a failing component re-renders, so de-duplicate
+telemetry. If `OnUnhandledException` declines a propagated error, a re-render
+ends the process (WinUI does not raise `Application.UnhandledException` for it).
 
 ## Recipe: Command Palette
 

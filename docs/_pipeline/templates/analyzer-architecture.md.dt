@@ -73,15 +73,15 @@ every invocation.
 `SemanticModel.GetSymbolInfo` is allocation-heavy and not free even on a
 single call. Don't reach for it inside the syntax callback unless a
 cheaper syntactic check has already filtered the node down to plausible
-candidates. The `MissingWithKeyAnalyzer` is the extreme: it never calls
-`GetSymbolInfo` at all. Its `REACTOR_DSL_001` arm decides with a substring
-check for `.WithKey(` in the lambda body — false positives only fire when
-the layout container also turns out to be a Reactor factory, which the
-analyzer then confirms by name list. Its `REACTOR_DSL_002` arm (non-stable
-keys) goes a step further but stays just as syntactic: it walks the key
+candidates. The `MissingWithKeyAnalyzer` is the extreme: every syntactic
+gate runs before any semantic call. Its `REACTOR_DSL_001` arm decides with
+a substring check for `.WithKey(` in the lambda body and a by-name walk to
+a layout factory, and only the few candidates that survive pay for
+`GetTypeInfo` on the projection and, for `ForEach`, `GetSymbolInfo` on the
+callee. Its `REACTOR_DSL_002` arm (non-stable
+keys) stays syntactic for the key itself: it walks the key
 expression and matches lambda parameter names and well-known per-render
-calls (`Guid.NewGuid()`, `DateTime.Now`, …) by name, still without resolving
-a single symbol.
+calls (`Guid.NewGuid()`, `DateTime.Now`, …) by name.
 <!-- /ai:caveat -->
 
 ## Diagnostic descriptors
@@ -102,6 +102,9 @@ a `.AutomationName(...)` modifier. The walk caps at the enclosing
 statement so a chain that wanders into another statement doesn't
 falsely satisfy the rule. The `HasModifierInChain` helper is the same
 shape every analyzer that needs to look at trailing modifiers uses.
+Only after those cheap syntactic filters does it ask the semantic model
+for the first argument's type: a `string`-typed label (a localized
+resource lookup, a variable) is a text button and needs no extra name.
 
 ## The current diagnostic set
 
@@ -172,12 +175,14 @@ sibling `src/Reactor.Analyzers.Internal/` project instead; see
 | `REACTOR_MEDIA_001` | Info | WebView2 is a direct child of an auto-layout stack (HStack/VStack/FlexRow/FlexColumn) without explicit .Width/.Height | `UnsizedWebViewInStackAnalyzer.cs` |
 | `REACTOR_ANIM_003` | Warning | async lambda to WithAnimation loses the ThreadStatic scope after await | `AnimationScopeAsyncAnalyzer.cs` |
 | `REACTOR_LIFECYCLE_002` | Warning | UseEffect(Action) allocates a timer/subscription/event with no returned cleanup | `EffectCleanupAnalyzer.cs` |
+| `REACTOR_LIFECYCLE_003` | Warning | A custom control updates its hosted child with Reconciler.UpdateChild, which skips the element-type check and leaves a replaced control mounted; use Reconcile (ships a rewrite fix) | `ReconcilerUpdateChildAnalyzer.cs` |
 | `REACTOR_MEMO_001` | Info | Modifiers on a keyed Memo(key,factory) wrapper opt the row out of the recycle cache | `MemoWrapperModifierAnalyzer.cs` |
 | `REACTOR_DYM_001` | Warning | Reactor property/field invoked like a method (e.g. `GridSize.Auto()`) | `NonInvocableMemberParensAnalyzer.cs` |
 | `REACTOR_DYM_002` | Warning | Invented `Theme.*Background` token (e.g. `Theme.AppBackground`); use `Theme.SolidBackground` (`Theme.LayerBackground` → `Theme.LayerFill`) | `ThemeBackgroundSuffixAnalyzer.cs` |
 | `REACTOR_DYM_003` | Warning | Mistyped Reactor factory name in call position (e.g. `Buton(...)`) | `FuzzyFactoryNameAnalyzer.cs` |
 | `REACTOR_DYM_004` | Warning | Reactor factory called with too few arguments (CS7036), single unique overload — suggests the parameter shape | `MissingFactoryArgumentAnalyzer.cs` |
 | `REACTOR_DYM_005` | Warning | String passed where a Reactor `Element` is expected (CS1503) — wrap it in a text factory | `StringForElementArgumentAnalyzer.cs` |
+| `REACTOR_DYM_006` | Warning | Constant color string `BrushHelper` can't parse, so it renders gray (e.g. `.Background("orange")`, `.Foreground("#888")`, a font name under a `*FontFamily` resource key) — suggests the hex value (or `new FontFamily(...)` once that `ResourceBuilder.Set` overload exists) | `ColorStringLiteralAnalyzer.cs` |
 
 `REACTOR_HOOKS_002` and `_003` were the reserved control-flow / data-flow slots
 (variable hook counts across early returns, async boundaries inside `UseEffect`);
@@ -194,11 +199,17 @@ cheap matching done right. It fires on a projection — either
 `items.Select(x => Row(x))` or Reactor's own
 `ForEach(items, x => Row(x))` — where `Row(...)` doesn't end in
 `.WithKey(...)`, and the keyed/unkeyed decision itself is nothing but a
-substring check on `body.ToString()`. The trade-off is conservative: a
-projection to a non-Reactor element type also gets the substring check,
-but the follow-on `IsConsumedAsLayoutChildren` walk filters to
+substring check on `body.ToString()`. The follow-on
+`IsConsumedAsLayoutChildren` walk filters to
 [`VStack`](layout.md) / `HStack` / `FlexRow` / `Grid` / `WrapGrid`
-parents by name.
+parents by name. A name match is not enough on its own, because a layout
+factory also takes values built with `Select`, such as
+`Grid(days.Select(_ => GridSize.Star()).ToArray(), rows, …)`. So the rule
+then resolves the projection's type and skips anything that is not a
+Reactor `Element`. It accepts the type the body converts to as well as its
+own type, so a string or chart builder that `ForEach` converts to an
+element still reports. It also follows `where T : Element` constraints.
+An unresolved type keeps the syntactic verdict.
 
 The two shapes need different amounts of evidence, and that is the
 lesson. `Select` is safe on syntax alone: it is always a member access

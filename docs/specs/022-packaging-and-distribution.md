@@ -141,9 +141,13 @@ The `<EmbeddedResource Include="..\..\SKILL.md">` line stays — `mur --skill` s
 
 ```
 Microsoft.UI.Reactor.1.0.0-preview.42.nupkg
-├── lib/net10.0-windows10.0.22621.0/
+├── lib/net10.0-windows10.0.22621/         # exactly one lib folder; see below
 │   ├── Reactor.dll
-│   └── Reactor.xml                        # XML doc comments
+│   ├── Reactor.pri
+│   ├── Reactor.xml                        # XML doc comments
+│   └── Reactor/Hosting/
+│       ├── ReactorApplication.xaml        # Application-level XamlControlsResources
+│       └── ReactorApplication.xbf         # compiled form, packed by _PackReactorApplicationXbf
 ├── analyzers/dotnet/cs/
 │   ├── Reactor.Analyzers.dll
 │   └── Reactor.Localization.Generator.dll
@@ -153,6 +157,33 @@ Microsoft.UI.Reactor.1.0.0-preview.42.nupkg
 ├── LICENSE
 └── Microsoft.UI.Reactor.nuspec
 ```
+
+### Exactly one `lib/` folder
+
+NuGet names the build-output folder `net10.0-windows10.0.22621`, while `$(TargetFramework)` is
+`net10.0-windows10.0.22621.0`. A file packed to a literal `lib\$(TargetFramework)\` path
+therefore lands in a second `lib/` folder for the same framework, which is how 0.1.0-preview.16
+shipped `ReactorApplication.xbf`. `_PackReactorApplicationXbf` adds the file as build output
+instead, so NuGet places it beside `Reactor.dll`. It runs at pack time because the `<None>`
+item it replaced was evaluated before the build created the file, so a clean pack left it out.
+
+### Build-tools dependency
+
+`Microsoft.UI.Reactor` depends on `Microsoft.Windows.SDK.BuildTools.MSIX` 1.7.260930100. Apps
+otherwise get that package only through `Microsoft.WindowsAppSDK.Base`, and every Base release
+so far (2.0.4, 2.0.5-experimental2) pins 1.7.251221100, which has two bugs that affect Reactor apps:
+
+- Expanding a package's `.pri` with `makepri.exe Dump` fails past `MAX_PATH` (`PRI175`), so apps
+  failed to build in deeply nested folders (issue #1271,
+  [WindowsAppSDK#6795](https://github.com/microsoft/WindowsAppSDK/issues/6795)). Measured with
+  only the build-tools version changed, a consumer of all three Reactor packages at the same
+  depth fails on 1.7.251221100 and builds on 1.7.260930100.
+- An unpackaged app's own `.pri` is left out of its publish output
+  ([WindowsAppSDK#6394](https://github.com/microsoft/WindowsAppSDK/issues/6394)), so the
+  published app crashes at startup or cannot load its own XAML.
+
+Remove the dependency once the Windows App SDK version Reactor depends on resolves
+1.7.260930100 or later by itself.
 
 ### Packaging configuration
 
@@ -430,7 +461,7 @@ Consumer gets: framework, analyzers, source generator, and WinUI SDK (transitive
 - **Internal feed ownership.** Which Azure Artifacts organization hosts the P1 feed? Creating one takes ~a day plus approvals.
 - **Signing prerequisite for P1.** Does the chosen internal feed enforce signed packages? If yes, P1 needs ESRP too, not just P2.
 - **Package ID.** `Microsoft.UI.Reactor` assumes we stay in the `Microsoft.UI.*` namespace (see spec 018 for the namespace rename). If that namespace decision changes, the package ID follows.
-- **WinUI SDK version.** The right Windows App SDK package is injected centrally per project shape (`Directory.Build.targets`): framework-dependent libraries — including the shipped `Microsoft.UI.Reactor` — reference `Microsoft.WindowsAppSDK.WinUI` (pinned via `WindowsAppSDKWinUIVersion`), so the published package flows only WinUI to consumers rather than the full metapackage (AI/ML/Widgets/DWrite); framework-dependent apps additionally reference `Microsoft.WindowsAppSDK.Runtime`; self-contained/MSIX projects keep the `Microsoft.WindowsAppSDK` metapackage (`WindowsAppSDKVersion`). Consumers who want a different WinUI version can reference their own `Microsoft.WindowsAppSDK*` version — NuGet unifies it transitively with the library's.
+- **WinUI SDK version.** The right Windows App SDK package is injected centrally per project shape (`Directory.Build.targets`): framework-dependent projects — libraries and apps alike, including the shipped `Microsoft.UI.Reactor` — reference `Microsoft.WindowsAppSDK.WinUI` (pinned via `WindowsAppSDKWinUIVersion`) plus `Microsoft.WindowsAppSDK.Runtime` rather than the full metapackage (AI/ML/Widgets/DWrite), so the published package flows WinUI + Runtime to consumers — without Runtime the SDK silently builds a consumer app self-contained; self-contained/MSIX projects keep the `Microsoft.WindowsAppSDK` metapackage (`WindowsAppSDKVersion`). Consumers who want a newer WinUI reference the `Microsoft.WindowsAppSDK` metapackage at that version, which moves Runtime and the components together. Referencing `Microsoft.WindowsAppSDK.WinUI` alone leaves Runtime at the library's version, and Runtime's component-version check fails the build.
 - **`mur` install-script trust boundary.** `iwr | iex` from GitHub Releases works for P1 but will concern P3 users. Document the signed-binary fallback (direct download + verify signature) before public launch.
 
 ## 14. Implementation Phases
