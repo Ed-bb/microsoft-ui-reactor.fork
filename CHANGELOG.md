@@ -34,6 +34,8 @@ Conventions for contributors:
   remain source-compatible; existing binaries must be rebuilt for the changed return types
   (spec 036 §11.3).
 
+- Optional `ItemsHost.SetCollection` and property-owned teardown via the three-callback `ImperativeBridged` overload ([control reconciler guide](docs/guide/control-reconciler-protocol.md)).
+
 - **ReactorGallery catches up with recent framework features.** A new **System →
   File pickers** page demonstrates `PickFileAsync`, `PickMultipleFilesAsync`
   (with labelled `FileTypeChoices`), `PickFolderAsync` / `PickMultipleFoldersAsync`
@@ -255,7 +257,34 @@ Conventions for contributors:
   `Reconcile` (neither reached the bad path), and the Extending Reactor Controls
   guide shows a `RegisterType` host reconciling its child.
 
+- **Connected animations between navigation pages (issue #1414).**
+  `NavigationTransition.Connected(key)` was a stub that played the Entrance page
+  transition; it now animates the element marked `.ConnectedAnimation(key)` on the
+  outgoing page into the matching element on the incoming page. The new
+  `NavigateOptions.ConnectedAnimationKey` pairs that shared element with any page
+  transition, such as DrillIn or Fade. `NavigationHost` waits briefly for the
+  destination's layout (including cold `ScrollView` content and elements an effect
+  creates), keeps both pages until both animations finish, and animates back on
+  `GoBack()` / `GoForward()`. Cached pages and the active pages of nested hosts take
+  part. A missing, duplicate or unmeasurable target falls back to the selected page
+  transition, and with Windows animations off the navigation completes immediately.
+  Each `NavigationHost` now owns its pages' lifecycle callbacks and guards, so a page
+  that hosts an inner navigation stack no longer runs that stack's callbacks and guards
+  as its own, and a page whose navigation is interrupted still receives
+  `onNavigatedFrom`. See the [navigation guide](docs/guide/navigation.md).
+
 ### Changed
+
+- **Markdown `LinkBuilder` now receives a `MarkdownLink`** (#1436). Breaking: the
+  callback's type changes from `Func<Element[], Uri, Element>` to
+  `Func<MarkdownLink, Element>`. `MarkdownLink` carries the label as plain `Text`
+  (image alt text in place of images, entities decoded, line breaks as spaces), the
+  formatted `Label` (`RichTextBlockElement`, `null` when empty, where the old
+  callback got a 0- or 1-element array), and the validated `Uri`, so setting an
+  accessible name or tooltip no longer means walking the label's inlines. Existing
+  `(label, uri) => ...` callbacks no longer compile; rewrite them as
+  `link => ...` using `link.Label` and `link.Uri`. The URI policy, nesting rules,
+  label styling and null-result error are unchanged.
 
 - **Picker helpers moved to `Microsoft.Windows.Storage.Pickers` and renamed as non-hooks**
   (issue #1374, spec 054 §8.3). Breaking: `UseFilePickerAsync` / `UseMultipleFilesPickerAsync`
@@ -380,6 +409,72 @@ Conventions for contributors:
 
 ### Fixed
 
+- **Unmount callbacks survive managed-wrapper collection** (spec 047 §3).
+  `.OnUnmount(...)` now lives in native attached state rather than a weak table
+  keyed by a managed wrapper, so a still-mounted control keeps its teardown callback
+  when WinRT projects a new wrapper before removal. Callbacks stay scoped to the host
+  that registered them. A wrapper that shares its control with an inner target, as
+  `Flyout` does, no longer erases the target's callback when the wrapper has no callback
+  of its own, or drops its own while the target re-registers.
+
+- **Keyed-list diagnostics retain their native control identity** (spec 047 §3).
+  Duplicate/null-key warning counters now share one ledger across managed wrappers
+  for the same control instead of emitting a second entry after wrapper collection.
+
+- **`AutoSuggestBox` clears stale choices when `Suggestions` becomes empty**
+  (spec 047 §6.1). The suggestions binding now clears the native `ItemsSource`
+  instead of skipping empty updates, preserving the existing control and allowing
+  later suggestions to repopulate it. Empty suggestions leave `ItemsSource` null,
+  so direct `Items.Add(...)` setters continue to work on mount.
+
+- **Keyed children keep their own controls while siblings exit** (spec 014, feature 2).
+  Fading controls retained from an earlier render no longer shift keyed prefix, suffix,
+  removal or reorder updates onto another child's control. Live controls keep their
+  identity and the final child order remains correct when the exits complete.
+  Null-mounted Memo slots remain absent from the physical map and insertion
+  anchors, including when exits occur in the same panel or another panel sharing
+  the reconciler. Retained exits and null-mounted slots no longer add control reads to
+  keyed updates that keep the children's order, and an exit playing in one panel no longer
+  adds a read per child to other keyed panels (up to 64 concurrent exits).
+
+- **Wrapped third-party controls now get source-map call sites** (spec 010). A factory
+  emitted by `[GenerateReactorWrapper]` (`SettingsCard(...)`, `RadialGauge(...)`) is
+  invisible to the source-map generator, because no source generator sees another's
+  output. Its calls were never stamped, and every DSL call taking one as an argument —
+  `VStack(8, SettingsCard(...))`, `HStack(8, gauge.Width(140))` — failed to bind there
+  and was dropped too, so devtools saw a bare `StackPanel` with no Reactor element.
+  `Reactor.Wrappers.Generator` now intercepts calls to the factories it emits (same line,
+  column and `ReactorSourceMap.Enabled` rules; only when `ReactorSourceMap` is true and
+  the build lists `Microsoft.UI.Reactor.Generated` in `InterceptorsNamespaces`), and the
+  source-map generator re-binds such containing calls as if each wrapper value were
+  already an `Element`, so they keep their location and declared name — or leaves a call
+  unstamped where that could change which overload the real compilation picks.
+
+- **ThemeRef resource overrides follow a `RequestedTheme` set outside the Reactor tree**
+  (follow-up to #771). When an app themes a native ancestor of a `ReactorHostControl`
+  or a `ReactorHost.ContentTarget`
+  (for example `RequestedTheme = Dark` on the window root under a Light app),
+  `.Resources(r => r.Set(key, Theme.Ref(...)))` overrides resolved against the app
+  theme: at mount the control is not yet parented, and no theme change follows to
+  re-resolve it. ListView, GridView, TreeView and ItemsView/ItemsRepeater rows realized
+  during layout had the same problem, because they mount outside any root pass.
+  Both hosts now supply a native theme anchor to the reconciler, including for custom
+  error fallbacks. Layout-time realization inherits its container's theme, pooled rows
+  refresh unchanged descendants when reused under a different theme, and a change to the host's inherited theme
+  forces a resource refresh even through unchanged subtrees (including when a
+  theme-event render runs before the host's Loaded event).
+
+- **A declarative `ContentDialog` follows the theme where it is declared** (issue #1388,
+  PR #1389). The dialog is side-mounted on the window's `XamlRoot`, so it rendered in the
+  window/app theme. It now follows the effective theme (`ActualTheme`) at its declaration
+  site, including local ancestor overrides and secondary windows, and updates while open.
+  `.RequestedTheme(...)` on the dialog is now forwarded to the visible dialog (it only
+  reached the hidden placeholder); an explicit `ElementTheme.Default` follows the owner, as
+  elsewhere in Reactor. `.Set(dialog => ...)` still runs last and wins, even when it writes
+  the theme the dialog would follow. Dialog content `ThemeRef` resources resolve against the
+  dialog's theme on first open. Apps relying on the old look can pin it with
+  `.RequestedTheme(...)` or `.Set(d => d.RequestedTheme = ...)`.
+
 - **Diagnostics an inspector relies on (winapp DevTools) are no longer missing or anonymous**
   (issue #1421, spec 044 / spec 010 / spec 042).
   - A commit-phase failure that replaces a window's content with the error screen now raises a
@@ -415,6 +510,10 @@ Conventions for contributors:
   outer link. If the outer target is rejected, the whole label renders as plain
   text, and a URL inside it does not become a separate link. Links render as
   before when no callback is set.
+- **Markdown numeric character references are decoded** (#1436). `&#65;` and
+  `&#x42;` used to render as literal text; they now render as `A` and `B`, like
+  named entities. Following CommonMark, `&#0;`, surrogate code points and values
+  above U+10FFFF render as U+FFFD.
 - **Opening a `Flyout` from state no longer replaces the window with a render error**
   (issue #1419). `Flyout(Button(...), ...) with { IsOpen = open }` opened through
   `FlyoutBase.ShowAttachedFlyout`, but a Button/SplitButton target holds its flyout in the
@@ -448,10 +547,21 @@ Conventions for contributors:
   exit transition is still playing also no longer pairs its siblings with the wrong control.
 
 - **`ListView<T>` / `GridView<T>` rows are unmounted when WinUI drops their container
-  without recycling it** (issue #1423). Under fast insert / remove churn WinUI could park
-  a container offscreen, unlinked from any item, without raising the recycle
+  without recycling it** (issues #1423, #1440). Under fast insert / remove / move churn WinUI
+  could park a container offscreen, unlinked from any item, without raising the recycle
   `ContainerContentChanging`, so the row's components stayed mounted: their effects never
   cleaned up, and a `ReactorDiagnostics.TrySetState` on one was accepted but never rendered.
+  The update-time sweep also handles an unlinked container whose item was already cleared while
+  its template still holds a live view; its visuals remain available for the native delete
+  transition. WinUI parks it in the layout pass after the update (a row moved twice, or moved
+  out of the realized range, is enough), so after a structural change the reconciler now checks
+  the containers once that layout pass completes. A throwing cleanup no longer stops that sweep:
+  every parked row is torn down and the failure goes to the `RenderErrorHandler` as
+  `Cleanup`. Teardowns that finish regardless of cleanup failures (issue #1291) now also
+  collect a throwing control handler, descriptor `OnUnmount` hook or property unmount callback,
+  decorator or `RegisterType` unmount callback rather than stopping at it: each failure is
+  reported once, in order, the children it did not reach are torn down (once each), and the
+  half-torn-down control is never pooled.
 
 - **`REACTOR_A11Y_001` no longer flags text buttons with a non-literal string label**
   (spec 006 §6.3). `Button(S("Usage_Refresh"), onClick)` — a localized resource lookup,
@@ -471,6 +581,8 @@ Conventions for contributors:
   (`ForEach`'s `Func<T, Element>`) and `where T : Element` constraints, so those
   projections still report. An unresolved type keeps the old verdict, so broken code
   still reports.
+
+- Flat `ItemsHost` children reconcile incrementally, same-instance Element item sources honor dirty-state/context/theme/forced-render invalidation instead of skipping unconditionally, and generated Element slots receive terminal teardown while still parented ([control reconciler guide](docs/guide/control-reconciler-protocol.md)).
 
 - **Source-map generator no longer fails under `dotnet watch`** (issue #1404, spec 010).
   When Reactor is a project reference, Hot Reload's workspace compilation sees Reactor's

@@ -102,12 +102,18 @@ public UIElement? Reconcile(
         // Consume the hot-reload and resource-refresh signals exactly once per
         // top-level pass so every component re-runs Render() even when props/deps
         // are unchanged (and, for a resource refresh, no element is skipped).
-        _resourceRefreshActive = _resourceRefreshArmed;
-        _resourceRefreshArmed = false;
+        bool hostPass = _realizationThemeDepth == 0;
+        var theme = hostPass ? InheritedRequestedTheme(ThemeAnchor) : _realizationTheme;
+        _resourceRefreshActive = hostPass
+            ? _resourceRefreshArmed || theme != _renderedHostTheme
+            : _realizationResourceRefresh;
+        if (hostPass)
+            _resourceRefreshArmed = false;
         _forceFullRenderActive = ForceFullRenderPending || _resourceRefreshActive;
         ForceFullRenderPending = false;
         _hotReloadRetryActive = HotReloadRetryPending;
         HotReloadRetryPending = false;
+        _ambientRequestedTheme = theme;
 
         // Build the dirty-ancestor path. For every component node
         // whose SelfTriggered is true, walk up the realized visual
@@ -120,17 +126,20 @@ public UIElement? Reconcile(
     try {
     try
     {
+        UIElement? result;
         if (newElement is null or EmptyElement)
         {
             if (existingControl is not null)
                 Unmount(existingControl);
-            return null;
+            result = null;
         }
-
-        if (oldElement is null or EmptyElement || existingControl is null)
-            return Mount(newElement, requestRerender);
-
-        return ReconcileImperative(oldElement, newElement, existingControl, requestRerender);
+        else if (oldElement is null or EmptyElement || existingControl is null)
+            result = Mount(newElement, requestRerender);
+        else
+            result = ReconcileImperative(oldElement, newElement, existingControl, requestRerender);
+        if (_debugReconcileDepth == 1 && _realizationThemeDepth == 0)
+            _renderedHostTheme = _ambientRequestedTheme;
+        return result;
 ```
 
 `Reconcile` is short on purpose. The interesting work is in `Mount`,
@@ -290,7 +299,7 @@ internal static void Reconcile(
     // transition in this collection (they inflate its count); the index walk would pair
     // every later child with the wrong control.
     else if (!ChildSlots.AlignByIndex(oldSlots, oldFiltered.Length, newSlots, newFiltered.Length)
-        || HoldsExitingControls(oldFiltered, children, reconciler))
+        || HoldsExitingControls(children, reconciler))
         ReconcileSlotted(oldFiltered, oldSlots, newFiltered, newSlots, children, reconciler, requestRerender, ambientKind, dirty);
     else
         ReconcilePositional(oldFiltered, newFiltered, children, reconciler, requestRerender, ambientKind, parentControl, dirty);
@@ -563,7 +572,7 @@ internal static void Reconcile(
     // transition in this collection (they inflate its count); the index walk would pair
     // every later child with the wrong control.
     else if (!ChildSlots.AlignByIndex(oldSlots, oldFiltered.Length, newSlots, newFiltered.Length)
-        || HoldsExitingControls(oldFiltered, children, reconciler))
+        || HoldsExitingControls(children, reconciler))
         ReconcileSlotted(oldFiltered, oldSlots, newFiltered, newSlots, children, reconciler, requestRerender, ambientKind, dirty);
     else
         ReconcilePositional(oldFiltered, newFiltered, children, reconciler, requestRerender, ambientKind, parentControl, dirty);

@@ -36,10 +36,6 @@ public sealed partial class Reconciler : IDisposable
     // look up per-instance navigation state; teardown stays here (Dispose loop +
     // CleanupNavigationHostNode).
     internal readonly Dictionary<UIElement, NavigationHostNode> _navigationHostNodes = new();
-    // Per-control unmount actions (.OnUnmount). Captured at ApplyModifiers from the
-    // authoritative modifier set (same source .OnMount reads), so it doesn't depend
-    // on the tagged element's identity at teardown. Invoked + removed on unmount.
-    private readonly global::System.Runtime.CompilerServices.ConditionalWeakTable<FrameworkElement, Action<FrameworkElement>> _onUnmountActions = new();
     // Internal so V1-owned lifecycle classes (e.g. LazyStackLifecycle) can rent
     // pooled controls and pass the pool into element factories.
     internal readonly ElementPool _pool = new();
@@ -104,6 +100,93 @@ public sealed partial class Reconciler : IDisposable
     // carries the reconciler's top-down knowledge so ThemeRef-backed ResourceOverrides
     // resolve their concrete brush against the correct effective theme at mount.
     private ElementTheme _ambientRequestedTheme = ElementTheme.Default;
+
+    /// <summary>
+    /// Native parent of the host's content, also used when installing error fallbacks.
+    /// </summary>
+    internal DependencyObject? ThemeAnchor { get; set; }
+    private ElementTheme _renderedHostTheme;
+    private ElementTheme _realizationTheme;
+    private int _realizationThemeDepth;
+    private bool _realizationResourceRefresh;
+    internal bool HostThemeChanged => InheritedRequestedTheme(ThemeAnchor) != _renderedHostTheme;
+
+    /// <summary>
+    /// The nearest explicit <c>RequestedTheme</c> on <paramref name="start"/> or its visual
+    /// ancestors, or Default. Covers themes set by Reactor on realized controls and themes
+    /// an app sets outside the Reactor tree (for example on a window root).
+    /// </summary>
+    internal static ElementTheme InheritedRequestedTheme(DependencyObject? start)
+    {
+        for (var node = start; node is not null; node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+        {
+            if (node is FrameworkElement { RequestedTheme: not ElementTheme.Default } themed)
+                return themed.RequestedTheme;
+        }
+        return ElementTheme.Default;
+    }
+
+    /// <summary>
+    /// Layout-time realization (an ItemsRepeater or ItemsView asking for a row) runs outside
+    /// any root pass, so no ambient theme is threaded to the row. Seed it from the parented
+    /// realization target so ThemeRef resource overrides on the still-unparented row resolve
+    /// against the theme it will render under. A realization nested in a pass keeps the
+    /// pass's ambient.
+    /// </summary>
+    internal RealizationThemeScope EnterRealizationTheme(DependencyObject? realizationParent, UIElement? reused = null)
+    {
+        var inherited = _debugReconcileDepth > 0
+            ? _ambientRequestedTheme : InheritedRequestedTheme(realizationParent);
+        bool refresh = reused is FrameworkElement reusedElement && TryGetReactorState(reusedElement, out var state)
+            && state.RealizationTheme is { } previous && previous != inherited;
+        var scope = new RealizationThemeScope(this, inherited);
+        _realizationThemeDepth++;
+        _realizationTheme = inherited;
+        _ambientRequestedTheme = inherited;
+        // A parked row missed the host refresh. Its unchanged children must not skip.
+        if (refresh)
+        {
+            _realizationResourceRefresh = true;
+            _resourceRefreshActive = true;
+            _forceFullRenderActive = true;
+        }
+        return scope;
+    }
+
+    internal readonly struct RealizationThemeScope : IDisposable
+    {
+        private readonly Reconciler? _owner;
+        private readonly ElementTheme _realization;
+        private readonly ElementTheme _ambient;
+        private readonly bool _realizationRefresh;
+        private readonly bool _refreshActive;
+        private readonly bool _forceActive;
+        internal ElementTheme Theme { get; }
+
+        internal RealizationThemeScope(Reconciler owner, ElementTheme theme)
+        {
+            _owner = owner;
+            Theme = theme;
+            _realization = owner._realizationTheme;
+            _ambient = owner._ambientRequestedTheme;
+            _realizationRefresh = owner._realizationResourceRefresh;
+            _refreshActive = owner._resourceRefreshActive;
+            _forceActive = owner._forceFullRenderActive;
+        }
+
+        public void Dispose()
+        {
+            if (_owner is null)
+                return;
+            _owner._realizationThemeDepth--;
+            _owner._realizationTheme = _realization;
+            _owner._ambientRequestedTheme = _ambient;
+            _owner._realizationResourceRefresh = _realizationRefresh;
+            _owner._resourceRefreshActive = _refreshActive;
+            _owner._forceFullRenderActive = _forceActive;
+        }
+    }
+
     private int _errorBoundaryDepth;
 
     /// <summary>
@@ -247,11 +330,8 @@ public sealed partial class Reconciler : IDisposable
                         Diagnostics.ComponentRenderControls.Registry.Forget(node.DiagnosticId, wrapper);
                     RunUnmountCleanups(node);
                 }
-                if (wrapper is FrameworkElement fe && _onUnmountActions.TryGetValue(fe, out var onUnmount))
-                {
-                    _onUnmountActions.Remove(fe);
-                    RunUnmountAction(onUnmount, fe);
-                }
+                if (wrapper is FrameworkElement fe)
+                    RunUnmountAction(fe);
                 if (_navigationHostNodes.ContainsKey(wrapper))
                     CleanupNavigationHostNode(wrapper);
             }
@@ -264,14 +344,16 @@ public sealed partial class Reconciler : IDisposable
     internal void NoteBoundaryMountRegistration(UIElement control) => _boundaryMountJournal?.Add(control);
 
     /// <summary>
-    /// When set, unmount runs every component cleanup and <c>.OnUnmount</c> action and hands
-    /// failures here instead of stopping at the first one (issue #1291). Used where a
+    /// When set, unmount runs every component cleanup, <c>.OnUnmount</c> action and control
+    /// handler / descriptor unmount hook and hands failures here instead of stopping at the
+    /// first one (issue #1291). Used where a
     /// teardown must complete regardless — replacing or releasing a tree for a render-error
-    /// outcome, and rolling back a failed boundary child — because the caller forgets the
-    /// tree afterwards and nothing could finish the job later. <c>null</c> keeps the normal
+    /// outcome, rolling back a failed boundary child, and sweeping a templated list's parked
+    /// containers — because nothing could finish the job later. <c>null</c> keeps the normal
     /// behaviour: the first failure escapes.
     /// </summary>
     private Action<Exception>? _unmountCleanupErrorSink;
+    private readonly object _unmountActionOwner = new();
 
     internal IsolatedUnmountScope IsolateUnmountCleanupFailures(Action<Exception> onError)
     {
@@ -284,6 +366,13 @@ public sealed partial class Reconciler : IDisposable
     {
         public void Dispose() => owner._unmountCleanupErrorSink = previous;
     }
+
+    /// <summary>Whether an <see cref="IsolateUnmountCleanupFailures"/> scope is collecting failures.</summary>
+    internal bool IsolatesUnmountCleanupFailures => _unmountCleanupErrorSink is not null;
+
+    /// <summary>Hands a teardown failure to the active isolation scope (a control handler's or
+    /// descriptor's unmount hook, which runs outside <see cref="RunUnmountCleanups"/>).</summary>
+    internal void ReportIsolatedUnmountFailure(Exception ex) => _unmountCleanupErrorSink?.Invoke(ex);
 
     private void RunUnmountCleanups(ComponentNode node)
     {
@@ -299,8 +388,14 @@ public sealed partial class Reconciler : IDisposable
         }
     }
 
-    private void RunUnmountAction(Action<FrameworkElement> onUnmount, FrameworkElement control)
+    private void RunUnmountAction(FrameworkElement control)
     {
+        if (!TryGetReactorState(control, out var state)
+            || !ReferenceEquals(state.UnmountActionOwner, _unmountActionOwner)
+            || state.UnmountAction is not { } onUnmount)
+            return;
+        state.UnmountAction = null;
+        state.UnmountActionOwner = null;
         if (_unmountCleanupErrorSink is not { } sink)
         {
             onUnmount(control);
@@ -992,14 +1087,20 @@ public sealed partial class Reconciler : IDisposable
     /// placeholder's published <c>owner=</c> is the owner its body was declared under, so it is
     /// restored for the mount. Nested components still scope their own subtrees.
     /// </summary>
-    internal UIElement? MountDialogContent(FrameworkElement placeholder, Element content, Action requestRerender)
+    internal UIElement? MountDialogContent(FrameworkElement placeholder, Element content, Action requestRerender, ElementTheme theme)
     {
-        if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
-            && CurrentDiagnosticOwner is null
-            && placeholder.GetValue(Diagnostics.ReactorDiagnostics.SourceProperty) is string published
-            && Diagnostics.ReactorSourcePublisher.Owner(published) is { } owner)
-            return MountUnderOwner(content, requestRerender, owner);
-        return Mount(content, requestRerender);
+        var previousTheme = _ambientRequestedTheme;
+        _ambientRequestedTheme = theme;
+        try
+        {
+            if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported && Diagnostics.ReactorSourcePublisher.IsEnabled
+                && CurrentDiagnosticOwner is null
+                && placeholder.GetValue(Diagnostics.ReactorDiagnostics.SourceProperty) is string published
+                && Diagnostics.ReactorSourcePublisher.Owner(published) is { } owner)
+                return MountUnderOwner(content, requestRerender, owner);
+            return Mount(content, requestRerender);
+        }
+        finally { _ambientRequestedTheme = previousTheme; }
     }
 
     private UIElement? MountUnderOwner(Element element, Action requestRerender, string owner)
@@ -1061,7 +1162,11 @@ public sealed partial class Reconciler : IDisposable
     /// realizing or refreshing a row) don't call it, so they can't consume the request.
     /// UI thread only; pair with <see cref="EndRootPass"/> in a finally.
     /// </summary>
-    internal void BeginRootPass() => _resourceRefreshArmed |= Interlocked.Exchange(ref _resourceRefreshPending, 0) != 0;
+    internal void BeginRootPass()
+    {
+        var pending = Interlocked.Exchange(ref _resourceRefreshPending, 0) != 0;
+        _resourceRefreshArmed |= pending || HostThemeChanged;
+    }
 
     /// <summary>
     /// Ends a host root pass. A request <see cref="BeginRootPass"/> armed that the pass never
@@ -1396,7 +1501,12 @@ public sealed partial class Reconciler : IDisposable
     internal sealed class ReactorState
     {
         public Element? Element;
+        internal ElementTheme? RealizationTheme;
         public ModifierEventHandlerState? Modifiers;
+        // Native identity keeps teardown alive when WinRT replaces a collected managed wrapper.
+        public Action<FrameworkElement>? UnmountAction;
+        // Opaque identity scopes callbacks to a reconciler without retaining that reconciler.
+        public object? UnmountActionOwner;
         // Per-native-element echo-suppress counter consumed by ChangeEchoSuppressor.
         // Lives here (not in a CWT-by-RCW) so that BeginSuppress on one managed
         // wrapper and ShouldSuppress on a different wrapper for the same native
@@ -1461,6 +1571,8 @@ public sealed partial class Reconciler : IDisposable
         // ops translate into container-level animations rather than full
         // re-realization.
         public Internal.ReactorListState? ListState;
+        // Flat item state shares the native control's existing attached state.
+        public V1Protocol.ItemsHostState? ItemsHostState;
 
         // Spec 047 §14 Phase 3 close-out — descriptor-side per-index view
         // source. Populated by Reconciler.BindKeyedItemsSource when a
@@ -1515,13 +1627,6 @@ public sealed partial class Reconciler : IDisposable
         public List<(Element Element, bool HasControl)>? MountedItemElements;
 
         /// <summary>
-        /// For an <c>ItemsHost</c> control: the collection entry each logical item realized
-        /// (-1 when it mounted nothing), recorded when the items are filled, so a resource
-        /// refresh can reconcile kept items in place (<c>ItemsHost.RefreshKeptItems</c>).
-        /// </summary>
-        public int[]? ItemsHostEntries;
-
-        /// <summary>
         /// <c>componentId</c> (<c>ReactorEventSource.ComponentRendered</c>) of the component
         /// whose wrapper this control is; 0 when none. Backs
         /// <c>ReactorTrace.TryGetComponentId</c>. Stored here rather than in a
@@ -1531,6 +1636,9 @@ public sealed partial class Reconciler : IDisposable
         /// Cleared when the component unmounts, before the wrapper can be pooled.
         /// </summary>
         public long ComponentDiagnosticId;
+
+        // Warning counts follow the native control's lifetime, including pool reuse.
+        public global::System.Collections.Concurrent.ConcurrentDictionary<long, int>? KeyedDiagnosticLedger;
     }
 
     internal static class ReactorAttached
@@ -1543,7 +1651,7 @@ public sealed partial class Reconciler : IDisposable
                 new PropertyMetadata(null));
     }
 
-    internal static ReactorState GetOrCreateReactorState(FrameworkElement fe)
+    internal static ReactorState GetOrCreateReactorState(UIElement fe)
     {
         if (fe.GetValue(ReactorAttached.StateProperty) is ReactorState state)
             return state;
@@ -1604,6 +1712,19 @@ public sealed partial class Reconciler : IDisposable
         if (element is null) return; // nothing to store
         state = new ReactorState { Element = element };
         control.SetValue(ReactorAttached.StateProperty, state);
+    }
+
+    internal void RefreshSkippedChildState(FrameworkElement control, Element oldElement, Element newElement)
+    {
+        if (newElement.HasCallbacks)
+            SetElementTag(control, newElement);
+        else if (CallSiteChangedOnSkip(oldElement, newElement))
+            RefreshCallSiteTagOnSkip(control, newElement);
+        if (global::Microsoft.UI.Reactor.Hosting.ReactorFeatures.DevtoolsSupported
+            && Diagnostics.ReactorSourcePublisher.IsEnabled
+            && CallSiteChangedOnSkip(oldElement, newElement))
+            PublishSourceOnSkip(control, newElement);
+        RefreshGestureDragStateOnSkip(control, oldElement.Modifiers, newElement.Modifiers);
     }
 
     /// <summary>
@@ -1912,9 +2033,9 @@ public sealed partial class Reconciler : IDisposable
     }
 
     /// <summary>
-    /// Drops the item records on a control (a FlipView's mounted items, an ItemsHost's entries).
-    /// They describe one mount, so a control leaving the tree, to the pool or for good, must not
-    /// keep them.
+    /// Drops non-owning item refresh snapshots when a control leaves the tree.
+    /// ItemsHostState also owns child teardown, so ItemsHostReconciliation.Unbind
+    /// clears it after reaching those children, not in this pre-unmount helper.
     /// </summary>
     internal static void ClearRefreshSnapshots(FrameworkElement fe)
     {
@@ -1925,7 +2046,6 @@ public sealed partial class Reconciler : IDisposable
     internal static void ClearRefreshSnapshots(ReactorState state)
     {
         state.MountedItemElements = null;
-        state.ItemsHostEntries = null;
     }
 
     /// <summary>
@@ -1974,6 +2094,8 @@ public sealed partial class Reconciler : IDisposable
         if (state.ComponentDiagnosticId != 0)
             Diagnostics.ComponentRenderControls.Registry.Forget(state.ComponentDiagnosticId, fe);
         state.Element = null;
+        state.UnmountAction = null;
+        state.UnmountActionOwner = null;
         state.Modifiers?.ClearCurrentHandlers();
         state.Modifiers = null;
         state.EchoSuppressCount = 0;
@@ -2349,6 +2471,8 @@ public sealed partial class Reconciler : IDisposable
                 rs.EchoSuppressScopeDepth = 0;
                 rs.PendingEchoMatch = null;
                 rs.PendingLabeledBy = null;
+                rs.UnmountAction = null;
+                rs.UnmountActionOwner = null;
                 ClearRefreshSnapshots(rs);
                 rs.Element = null;
             }
@@ -2850,12 +2974,18 @@ public sealed partial class Reconciler : IDisposable
             // Consume the hot-reload and resource-refresh signals exactly once per
             // top-level pass so every component re-runs Render() even when props/deps
             // are unchanged (and, for a resource refresh, no element is skipped).
-            _resourceRefreshActive = _resourceRefreshArmed;
-            _resourceRefreshArmed = false;
+            bool hostPass = _realizationThemeDepth == 0;
+            var theme = hostPass ? InheritedRequestedTheme(ThemeAnchor) : _realizationTheme;
+            _resourceRefreshActive = hostPass
+                ? _resourceRefreshArmed || theme != _renderedHostTheme
+                : _realizationResourceRefresh;
+            if (hostPass)
+                _resourceRefreshArmed = false;
             _forceFullRenderActive = ForceFullRenderPending || _resourceRefreshActive;
             ForceFullRenderPending = false;
             _hotReloadRetryActive = HotReloadRetryPending;
             HotReloadRetryPending = false;
+            _ambientRequestedTheme = theme;
 
             // Build the dirty-ancestor path. For every component node
             // whose SelfTriggered is true, walk up the realized visual
@@ -2868,17 +2998,20 @@ public sealed partial class Reconciler : IDisposable
         try {
         try
         {
+            UIElement? result;
             if (newElement is null or EmptyElement)
             {
                 if (existingControl is not null)
                     Unmount(existingControl);
-                return null;
+                result = null;
             }
-
-            if (oldElement is null or EmptyElement || existingControl is null)
-                return Mount(newElement, requestRerender);
-
-            return ReconcileImperative(oldElement, newElement, existingControl, requestRerender);
+            else if (oldElement is null or EmptyElement || existingControl is null)
+                result = Mount(newElement, requestRerender);
+            else
+                result = ReconcileImperative(oldElement, newElement, existingControl, requestRerender);
+            if (_debugReconcileDepth == 1 && _realizationThemeDepth == 0)
+                _renderedHostTheme = _ambientRequestedTheme;
+            return result;
             // </snippet:reconciler-entry>
         }
         finally
@@ -2903,6 +3036,7 @@ public sealed partial class Reconciler : IDisposable
                 _forceFullRenderActive = false;
                 _resourceRefreshActive = false;
                 _hotReloadRetryActive = false;
+                _ambientRequestedTheme = ElementTheme.Default;
                 _dirtyAncestorPath?.Clear();
                 _dirtyPathChildren?.Clear();
             }
@@ -3696,19 +3830,24 @@ public sealed partial class Reconciler : IDisposable
     {
         if (!_navigationHostNodes.TryGetValue(control, out var navNode))
             return;
+        navNode.TransitionGeneration++;
+        navNode.ConnectedOperation?.Dispose();
+        navNode.ConnectedOperation = null;
         if (navNode.RouteChangedHandler is not null)
             navNode.Handle.RouteChanged -= navNode.RouteChangedHandler;
         navNode.Handle.Detach();
         navNode.Cache?.Clear();
         if (navNode.CurrentChildControl is not null)
-            UnmountRecursive(navNode.CurrentChildControl);
+            Navigation.ConnectedNavigationOperation.UnmountPage(this, navNode.CurrentChildControl);
         _navigationHostNodes.Remove(control);
     }
 
     private void UnmountRecursive(UIElement control)
     {
+        if (SkipOrTrackIsolatedTeardown(control)) return;
         NoteUnmountDuringSlotUpdate(control);
         EndExit(control);
+        CancelPostLayoutSweep(control);
         // Before any early exit: an unmounted control an app still holds must not keep a
         // FlipView's mounted item elements alive.
         if (control is FrameworkElement snapshotFe) ClearRefreshSnapshots(snapshotFe);
@@ -3747,11 +3886,8 @@ public sealed partial class Reconciler : IDisposable
         WithdrawAttachedValidation(control);
 
         // OnUnmountAction (.OnUnmount) — imperative teardown half of .OnMount.
-        if (control is FrameworkElement umFe && _onUnmountActions.TryGetValue(umFe, out var onUnmount))
-        {
-            _onUnmountActions.Remove(umFe);
-            RunUnmountAction(onUnmount, umFe);
-        }
+        if (control is FrameworkElement umFe)
+            RunUnmountAction(umFe);
 
         // Issue #917 — a TitleBar going away withdraws both its
         // ExtendsContentIntoTitleBar inference and its caption-height
@@ -3789,7 +3925,11 @@ public sealed partial class Reconciler : IDisposable
         if (control is FrameworkElement v1Fe && GetElementTag(v1Fe) is Element v1TagEl
             && _v1Handlers.TryGet(v1TagEl.GetType(), out var v1Entry) && v1Entry.HasUnmount)
         {
-            var v1Disposition = v1Entry.Unmount(control, this);
+            V1Protocol.V1UnmountDisposition v1Disposition;
+            if (!IsolatesUnmountCleanupFailures)
+                v1Disposition = v1Entry.Unmount(control, this);
+            else if (!RunIsolatedTeardown(control, v1Entry, static (entry, c, r) => entry.Unmount(c, r), out v1Disposition))
+                return;
             if (v1Disposition != V1Protocol.V1UnmountDisposition.ContinueDefaultTraversal)
                 return;
         }
@@ -3800,8 +3940,7 @@ public sealed partial class Reconciler : IDisposable
             && _typeRegistry.TryGetValue(tagEl.GetType(), out var reg) && reg.HasUnmount
             && TryBeginRegisteredUnmount(regState))
         {
-            try { reg.Unmount(control, this); }
-            finally { EndRegisteredUnmount(regState); }
+            RunRegisteredUnmount(reg, control, regState);
             return;
         }
 
@@ -3863,6 +4002,107 @@ public sealed partial class Reconciler : IDisposable
         (_registeredUnmountsRunning ??= new HashSet<ReactorState>(ReferenceEqualityComparer.Instance)).Add(state);
 
     private void EndRegisteredUnmount(ReactorState state) => _registeredUnmountsRunning?.Remove(state);
+
+    // While a control handler's or RegisterType callback's teardown runs under
+    // IsolateUnmountCleanupFailures: the controls it has torn down. If it throws part-way, the
+    // recovery walk over its children (_isolatedTeardownSkip) skips those, so no child
+    // teardown runs twice.
+    private HashSet<UIElement>? _isolatedTeardownTrack;
+    private HashSet<UIElement>? _isolatedTeardownSkip;
+
+    // Entry of both unmount walks: true to skip a control already torn down by the failed
+    // teardown being recovered; otherwise records the control for the running teardown.
+    private bool SkipOrTrackIsolatedTeardown(UIElement control)
+    {
+        if (_isolatedTeardownSkip is { } skip && skip.Contains(control)) return true;
+        _isolatedTeardownTrack?.Add(control);
+        return false;
+    }
+
+    /// <summary>
+    /// Runs a control's teardown (a V1 handler's or a <c>RegisterType</c> unmount) inside an
+    /// isolated teardown (<see cref="IsolateUnmountCleanupFailures"/>). A throw is collected, and
+    /// the Reactor children the teardown did not reach are torn down, each once; returns false
+    /// then, and the caller must not pool the half-torn-down control.
+    /// </summary>
+    private bool RunIsolatedTeardown<TState>(UIElement control, TState state,
+        Func<TState, UIElement, Reconciler, V1Protocol.V1UnmountDisposition> teardown,
+        out V1Protocol.V1UnmountDisposition disposition)
+    {
+        disposition = default;
+        var outerTrack = _isolatedTeardownTrack;
+        var track = _isolatedTeardownTrack = new HashSet<UIElement>(ReferenceEqualityComparer.Instance);
+        bool failed = false;
+        try { disposition = teardown(state, control, this); }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+        {
+            // A handler that reported its failures itself (in order) only signals the failure.
+            if (ex is not V1Protocol.ReportedUnmountFailureException)
+                ReportIsolatedUnmountFailure(ex);
+            failed = true;
+        }
+        finally { _isolatedTeardownTrack = outerTrack; }
+        if (!failed) return true;
+
+        // An enclosing recovery's skips still apply: what an outer teardown tore down inside
+        // this control must not be torn down again by this control's recovery.
+        var outerSkip = _isolatedTeardownSkip;
+        if (outerSkip is not null) track.UnionWith(outerSkip);
+        _isolatedTeardownSkip = track;
+        try { ForEachReactorChildControl(control, UnmountRecursive); }
+        finally { _isolatedTeardownSkip = outerSkip; }
+        return false;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="teardown"/> (a handler's own child teardown after its unmount hook
+    /// failed, inside <see cref="RunIsolatedTeardown"/>) skipping the controls the running
+    /// teardown already tore down, so none is torn down twice.
+    /// </summary>
+    internal void SkippingIsolatedTornDown<TState>(TState state, Action<TState> teardown)
+    {
+        var outerSkip = _isolatedTeardownSkip;
+        var skip = new HashSet<UIElement>(ReferenceEqualityComparer.Instance);
+        if (_isolatedTeardownTrack is { } track) skip.UnionWith(track);
+        if (outerSkip is not null) skip.UnionWith(outerSkip);
+        _isolatedTeardownSkip = skip;
+        try { teardown(state); }
+        finally { _isolatedTeardownSkip = outerSkip; }
+    }
+
+    /// <summary>
+    /// Runs a <c>RegisterType</c> unmount callback; inside an isolated teardown, through
+    /// <see cref="RunIsolatedTeardown"/>. Returns false when it failed part-way.
+    /// </summary>
+    private bool RunRegisteredUnmount(ITypeRegistration reg, UIElement control, ReactorState regState)
+    {
+        try
+        {
+            if (!IsolatesUnmountCleanupFailures)
+            {
+                reg.Unmount(control, this);
+                return true;
+            }
+            return RunIsolatedTeardown(control, reg, static (registration, c, r) =>
+            {
+                registration.Unmount(c, r);
+                return V1Protocol.V1UnmountDisposition.CollectSelf;
+            }, out _);
+        }
+        finally { EndRegisteredUnmount(regState); }
+    }
+
+    // Mounted content can exist before a control template attaches it to the
+    // visual tree. Navigation must see those slots without forcing template/layout.
+    internal void VisitMountedChildControls(UIElement control, Action<UIElement> visit)
+    {
+        ForEachReactorChildControl(control, visit);
+        if (GetElementTag(control) is { } element
+            && global::Microsoft.UI.Reactor.Diagnostics.ReactorSourceMap.UnwrapDecorators(element) is { } hostElement
+            && _v1Handlers.TryGet(hostElement.GetType(), out var entry)
+            && entry is IV1ChildEnumerator children)
+            children.VisitLiveChildren(control, visit);
+    }
 
     private static void ForEachReactorChildControl(UIElement control, Action<UIElement> visit)
         => ForEachReactorChildControl(control, child => { visit(child); return true; });
@@ -3990,6 +4230,33 @@ public sealed partial class Reconciler : IDisposable
     internal bool HasExitingControls => _exitingControls is { Count: > 0 };
 
     internal bool IsExiting(UIElement control) => _exitingControls?.Contains(control) == true;
+
+    // Up to this many in-flight exits, probing the collection once per exit beats reading it.
+    // A probe is one native IndexOf (a pointer scan, no managed allocation); a read is a
+    // WinRT call per child that allocates its projection. Past it the probes' combined native
+    // scans approach the cost of one managed pass, and only a mass exit gets there.
+    internal const int ExitProbeLimit = 64;
+
+    /// <summary>
+    /// Whether <paramref name="children"/> holds a control that is still playing its exit.
+    /// Probes the collection for each in-flight exit (one native IndexOf apiece) rather than
+    /// reading every child: each projected read is a WinRT call that allocates, and an exit
+    /// playing in one panel would otherwise tax every keyed panel the reconciler visits.
+    /// </summary>
+    internal bool HoldsExitingControlIn(IChildCollection children)
+    {
+        if (_exitingControls is not { Count: > 0 } exiting) return false;
+        if (exiting.Count <= ExitProbeLimit)
+        {
+            foreach (var control in exiting)
+                if (children.IndexOf(control) >= 0) return true;
+            return false;
+        }
+        int count = children.Count;
+        for (int i = 0; i < count; i++)
+            if (exiting.Contains(children.Get(i))) return true;
+        return false;
+    }
 
     private void BeginExit(UIElement control) => (_exitingControls ??= new()).Add(control);
 
@@ -4167,9 +4434,11 @@ public sealed partial class Reconciler : IDisposable
 
     private void UnmountAndCollect(UIElement control, List<FrameworkElement> toPool)
     {
+        if (SkipOrTrackIsolatedTeardown(control)) return;
         NoteUnmountDuringSlotUpdate(control);
         // A control torn down with an ancestor while still fading out is no longer exiting.
         EndExit(control);
+        CancelPostLayoutSweep(control);
         // Before any early exit: an unmounted control an app still holds must not keep a
         // FlipView's mounted item elements alive.
         if (control is FrameworkElement snapshotFe) ClearRefreshSnapshots(snapshotFe);
@@ -4198,11 +4467,8 @@ public sealed partial class Reconciler : IDisposable
         WithdrawAttachedValidation(control);
 
         // OnUnmountAction (.OnUnmount) — imperative teardown half of .OnMount.
-        if (control is FrameworkElement umFe && _onUnmountActions.TryGetValue(umFe, out var onUnmount))
-        {
-            _onUnmountActions.Remove(umFe);
-            RunUnmountAction(onUnmount, umFe);
-        }
+        if (control is FrameworkElement umFe)
+            RunUnmountAction(umFe);
 
         // Issue #917 — mirrors UnmountRecursive: a TitleBar reached through the
         // pooling traversal (nested in a poolable container) must also withdraw
@@ -4238,7 +4504,12 @@ public sealed partial class Reconciler : IDisposable
         if (control is FrameworkElement v1Fe && GetElementTag(v1Fe) is Element v1TagEl
             && _v1Handlers.TryGet(v1TagEl.GetType(), out var v1Entry) && v1Entry.HasUnmount)
         {
-            var v1Disposition = v1Entry.Unmount(control, this);
+            V1Protocol.V1UnmountDisposition v1Disposition;
+            if (!IsolatesUnmountCleanupFailures)
+                v1Disposition = v1Entry.Unmount(control, this);
+            // A teardown that failed part-way leaves a half-torn-down control: never pool it.
+            else if (!RunIsolatedTeardown(control, v1Entry, static (entry, c, r) => entry.Unmount(c, r), out v1Disposition))
+                return;
             switch (v1Disposition)
             {
                 case V1Protocol.V1UnmountDisposition.CollectSelf:
@@ -4257,8 +4528,9 @@ public sealed partial class Reconciler : IDisposable
             && _typeRegistry.TryGetValue(tagEl.GetType(), out var reg) && reg.HasUnmount
             && TryBeginRegisteredUnmount(regState))
         {
-            try { reg.Unmount(control, this); }
-            finally { EndRegisteredUnmount(regState); }
+            // A callback that failed part-way leaves a half-torn-down control: never pool it.
+            if (!RunRegisteredUnmount(reg, control, regState))
+                return;
             // Collect this control for pooling, but do NOT recurse into children —
             // they were created outside Reactor's tree and must not be pooled.
             // (Mirrors UnmountRecursive which returns early in this case.)
@@ -5553,6 +5825,15 @@ public sealed partial class Reconciler : IDisposable
     // never cancelled; see PrepareConnectedAnimationSource for why a cancel can crash.
     private readonly HashSet<string> _preparedConnectedAnimationKeys = new(StringComparer.Ordinal);
 
+    private readonly Dictionary<UIElement, int> _navigationConnectedElements = new();
+    internal void ClaimNavigationConnectedElement(UIElement element) =>
+        _navigationConnectedElements[element] = _navigationConnectedElements.GetValueOrDefault(element) + 1;
+    internal void ReleaseNavigationConnectedElement(UIElement element)
+    {
+        if (_navigationConnectedElements.GetValueOrDefault(element) <= 1) _navigationConnectedElements.Remove(element);
+        else _navigationConnectedElements[element]--;
+    }
+
     /// <summary>
     /// Publishes the source snapshot for an unmounting element, so a destination mounting
     /// under the same key in this pass can travel from it.
@@ -5590,6 +5871,7 @@ public sealed partial class Reconciler : IDisposable
     /// </remarks>
     private void PrepareConnectedAnimationSource(string key, UIElement control)
     {
+        if (_navigationConnectedElements.ContainsKey(control)) return;
         if (ConnectedAnimationFrameGate.IsAwaitingFrame(key))
         {
             ConnectedAnimationPreparationsSkipped++;
@@ -5649,6 +5931,7 @@ public sealed partial class Reconciler : IDisposable
 
             foreach (var (key, target) in _pendingConnectedAnimationStarts)
             {
+                if (_navigationConnectedElements.ContainsKey(target)) continue;
                 try
                 {
                     // Scoped to this pass on purpose: the service is view-wide and holds
@@ -6087,16 +6370,27 @@ public sealed partial class Reconciler : IDisposable
 
         // OnUnmountAction — captured here (authoritative modifier set) so it fires
         // reliably at teardown regardless of the tagged element's identity. Keep the
-        // latest action across re-renders; clear unconditionally when absent so a
-        // pooled control reused for a no-OnUnmount element can't fire a stale action
-        // (pool reuse remounts with oldM == null, so this can't be gated on oldM).
+        // latest action across re-renders; don't clear an inner target's registration
+        // when a shared-control wrapper drops its own callback. Owner identity prevents
+        // a retained control from firing a disposed reconciler's callback in a new host.
+        // Known limitation: a shared control has one slot, so a wrapper's callback
+        // replaces the target's. If the wrapper later drops it while the target update is
+        // shallow-skipped, nothing re-registers the target's callback and it is lost.
         if (m.OnUnmountAction is not null)
         {
-            _onUnmountActions.AddOrUpdate(fe, m.OnUnmountAction);
+            var callbackState = GetOrCreateReactorState(fe);
+            callbackState.UnmountAction = m.OnUnmountAction;
+            callbackState.UnmountActionOwner = _unmountActionOwner;
             _boundaryMountJournal?.Add(fe);
         }
-        else
-            _onUnmountActions.Remove(fe);
+        else if (oldM?.OnUnmountAction is not null
+            && TryGetReactorState(fe, out var unmountState)
+            && ReferenceEquals(unmountState.UnmountActionOwner, _unmountActionOwner)
+            && ReferenceEquals(unmountState.UnmountAction, oldM.OnUnmountAction))
+        {
+            unmountState.UnmountAction = null;
+            unmountState.UnmountActionOwner = null;
+        }
 
         // Element ref — populate on mount/update so imperative APIs (FocusManager.Focus)
         // can target the mounted control. Writing on every update is cheap (single field
@@ -7114,7 +7408,7 @@ public sealed partial class Reconciler : IDisposable
     /// element is not yet parented and so an ancestor <c>RequestedTheme</c> is
     /// unreachable through <paramref name="fe"/>'s own visual-tree walk. Pass
     /// <see cref="ElementTheme.Default"/> to fall back to fe-based resolution
-    /// (host-window themes set outside the Reactor tree; the 3-arg overload).
+    /// (for example, callers of the 3-arg overload).
     /// </param>
     public static void ApplyResourceOverrides(
         FrameworkElement fe,
@@ -7173,8 +7467,7 @@ public sealed partial class Reconciler : IDisposable
         // resolve against it: at mount fe is not yet parented, so its own visual-tree
         // walk cannot see an ancestor RequestedTheme and would otherwise fall back to
         // the app theme (the mount-theme bug). When no ambient theme is supplied
-        // (Default — direct public-API callers, or a host/window theme set outside the
-        // Reactor tree), keep the fe-based resolution.
+        // (Default — for example, direct public-API callers), keep the fe-based resolution.
         foreach (var (key, themeRef) in newOverrides.ThemeRefs)
         {
             var resolved = effectiveTheme != ElementTheme.Default
@@ -7429,6 +7722,8 @@ public sealed partial class Reconciler : IDisposable
     /// </summary>
     internal class NavigationHostNode
     {
+        public Navigation.ConnectedNavigationOperation? ConnectedOperation { get; set; }
+        public long TransitionGeneration { get; set; }
         /// <summary>The type-erased navigation handle (implements INavigationHandle internally).</summary>
         public Navigation.INavigationHandle Handle { get; set; } = null!;
         /// <summary>The route that was last rendered.</summary>
@@ -7474,7 +7769,9 @@ public sealed partial class Reconciler : IDisposable
 
     private void CollectLifecycleHooksRecursive(UIElement? control, List<RenderContext.NavigationLifecycleHookState> hooks)
     {
-        if (control is null) return;
+        // A nested host owns its pages' lifecycle. Its route contexts and guards
+        // belong to that stack, not the enclosing page's navigation operation.
+        if (control is null || _navigationHostNodes.ContainsKey(control)) return;
 
         if (_componentNodes.TryGetValue(control, out var node))
         {
@@ -7545,7 +7842,7 @@ public sealed partial class Reconciler : IDisposable
     /// </summary>
     internal void InvokeNavigatingFrom(UIElement? root, Navigation.NavigatingFromContext ctx)
     {
-        if (root is null) return;
+        if (root is null || _navigationHostNodes.ContainsKey(root)) return;
 
         if (_componentNodes.TryGetValue(root, out var node))
         {
@@ -7655,11 +7952,14 @@ public sealed partial class Reconciler : IDisposable
         _errorBoundaryNodes.Clear();
         foreach (var node in _navigationHostNodes.Values)
         {
+            node.TransitionGeneration++;
+            node.ConnectedOperation?.Dispose();
+            node.ConnectedOperation = null;
             if (node.RouteChangedHandler is not null)
                 node.Handle.RouteChanged -= node.RouteChangedHandler;
             node.Handle.Detach();
             if (node.CurrentChildControl is not null)
-                UnmountRecursive(node.CurrentChildControl);
+                Navigation.ConnectedNavigationOperation.UnmountPage(this, node.CurrentChildControl);
             node.Cache?.Clear();
         }
         _navigationHostNodes.Clear();
@@ -7676,4 +7976,3 @@ public sealed partial class Reconciler : IDisposable
         return pendingPropagation;
     }
 }
-

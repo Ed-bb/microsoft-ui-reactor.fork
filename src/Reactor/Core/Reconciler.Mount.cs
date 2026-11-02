@@ -711,6 +711,7 @@ public sealed partial class Reconciler
         if (viewSource is not null && args.ItemIndex >= 0 && args.ItemIndex < viewSource.ItemCount
             && args.ItemContainer.ContentTemplateRoot is ContentControl cc)
         {
+            using var realizationTheme = EnterRealizationTheme(args.ItemContainer);
             // WinUI can re-realize a container without first raising the recycle event
             // for its previous row; unmount that row's view or its components leak.
             UnmountItemView(cc, clearContent: false);
@@ -737,8 +738,8 @@ public sealed partial class Reconciler
 
     /// <summary>
     /// Unmounts the item view a templated items control's container hosts. The container's
-    /// element tag marks the view as live: an orphan sweep
-    /// (<see cref="RefreshRealizedContainers"/>) unmounts a view but leaves its visuals in
+    /// element tag marks the view as live: a sweep of parked containers
+    /// (<see cref="SweepParkedContainers"/>) unmounts a view but leaves its visuals in
     /// place for a delete transition, and clears the tag so no path unmounts it twice.
     /// </summary>
     internal void UnmountItemView(ContentControl cc, bool clearContent)
