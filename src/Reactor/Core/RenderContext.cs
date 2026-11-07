@@ -879,9 +879,21 @@ public sealed class RenderContext
         if (_hookIndex >= _hooks.Count)
         {
             var resolvedScope = ResolvePersistedScope(scope);
-            T initial = (resolvedScope is not null && resolvedScope.TryGet<T>(key, out var cached))
-                ? cached
-                : initialValue;
+            object? cached = null;
+            bool found = resolvedScope switch
+            {
+                WindowPersistedScope window => window.TryGetValue(key, out cached),
+                ApplicationPersistedScope application => application.TryGetValue(key, out cached),
+                _ => false,
+            };
+            T initial = initialValue;
+            if (found)
+            {
+                if (cached is T typed)
+                    initial = typed;
+                else if (cached is null && default(T) is null)
+                    initial = default!;
+            }
             _hooks.Add(new PersistedHookState<T>(initial) { PersistKey = key, Scope = resolvedScope });
         }
 
@@ -2717,9 +2729,20 @@ public sealed class RenderContext
         return false;
     }
 
-    private static bool DepsEqual(object[] prev, object[] next)
+    /// <summary>
+    /// Determines whether two dependency arrays are equal.
+    /// </summary>
+    /// <param name="prev">The previous dependency snapshot, or null if none exists.</param>
+    /// <param name="next">The current dependencies.</param>
+    /// <returns>
+    /// <see langword="true"/> if <paramref name="prev"/> is non-null and both arrays have
+    /// the same length and equal corresponding elements using <c>object.Equals</c>;
+    /// otherwise, <see langword="false"/>.
+    /// </returns>
+    internal static bool DepsEqual(object?[]? prev, object?[] next)
     {
-        if (prev.Length != next.Length) return false;
+        if (prev is null || prev.Length != next.Length) return false;
+        if (ReferenceEquals(prev, next)) return true;
         for (int i = 0; i < prev.Length; i++)
         {
             if (!Equals(prev[i], next[i])) return false;

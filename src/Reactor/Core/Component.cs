@@ -323,6 +323,16 @@ public abstract class Component
         InfiniteResourceOptions? options = null)
         => Context.UseInfiniteResource(fetchPage, deps, options);
 
+    /// <summary>Projects a data source into a paged resource using the ambient query cache.</summary>
+    /// <remarks>
+    /// The initial page size comes from <c>options.PageSize</c> (default 50) when
+    /// <paramref name="options"/> is supplied, or <c>request.PageSize</c> otherwise,
+    /// and is clamped to at least 1.
+    /// This size stays fixed across renders and query restarts. To change it,
+    /// have the parent remount the calling component with a different key,
+    /// e.g. <c>.WithKey($"tasks:{pageSize}")</c>, or increment a parent-owned
+    /// reset version used by <c>.WithKey($"tasks:{resetVersion}")</c>.
+    /// </remarks>
     protected InfiniteResource<TItem> UseDataSource<TItem>(
         Data.IDataSource<TItem> source,
         Data.DataRequest request,

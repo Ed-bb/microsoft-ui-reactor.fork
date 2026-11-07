@@ -300,7 +300,7 @@ a folder inside `Reactor.dll`.
 
 **`Reactor.dll` is in your publish output as a managed assembly,
 not a tucked-away framework package.** Reactor ships as the public preview
-NuGet package `Microsoft.UI.Reactor` version `0.1.0-preview.16`; local
+NuGet package `Microsoft.UI.Reactor` version `0.1.0-preview.17`; local
 source-built smoke packages still use `0.0.0-local` via `mur pack-local`.
 Trim-friendly deployments don't get any framework-side magic; the same trimmer
 configuration that works for any WinUI 3 app works here.
@@ -331,11 +331,11 @@ directly.
 `Microsoft.UI.Reactor.Devtools` package** (gated by a
 `Condition="'$(Configuration)' == 'Debug'"` ItemGroup that adds both
 the package and `RuntimeHostConfigurationOption
-Reactor.DevtoolsSupport=true`). The scaffolded
-`Properties/launchSettings.json` ships a second
-`"<AppName> Devtools"` profile that passes `--devtools`; select it in
-Visual Studio or VS Code — the default profile passes no arguments — to
-light up the right-click devtools menu and the docked devtools window.
+Reactor.DevtoolsSupport=true`). That makes devtools available without
+turning them on: the default launch profile passes no arguments, so launch
+with `dotnet run -- --devtools app` and render `DevtoolsMenu(...)` to get the
+[in-app dev menu](dev-tooling.md#in-app-dev-menu) (see
+[Running with devtools](getting-started.md#running-with-devtools)).
 The Reactor Visual
 Studio embedded-preview extension (spec 056) also relies on this
 Debug wiring — its `dotnet watch run -- --devtools run --embed

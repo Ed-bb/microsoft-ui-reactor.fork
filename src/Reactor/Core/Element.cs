@@ -4377,12 +4377,31 @@ public partial record PersonPictureElement() : Element
 [global::Microsoft.UI.Reactor.Wrappers.WrapManual("ProfilePicture")]
 public partial record PersonPictureElement
 {
+    // Issue #1460: a null, empty, malformed, or relative value (WinRT image sources need
+    // an absolute URI) clears the picture so the control falls back to initials/glyph,
+    // instead of throwing mid-reconcile or leaving a stale image from a prior render.
     private static partial global::Microsoft.UI.Reactor.Core.V1Protocol.Descriptor.ControlDescriptor<PersonPictureElement, WinUI.PersonPicture> Customize(
         global::Microsoft.UI.Reactor.Core.V1Protocol.Descriptor.ControlDescriptor<PersonPictureElement, WinUI.PersonPicture> d)
-        => d.OneWayConditional<string>(
-            static e => e.ProfilePicture!,
-            static (c, v) => c.ProfilePicture = new global::Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new global::System.Uri(v, global::System.UriKind.RelativeOrAbsolute)),
-            static e => e.ProfilePicture is not null);
+        => d.OneWay<string?>(
+            static e => e.ProfilePicture,
+            static (c, v) =>
+            {
+                if (TryParseProfilePictureUri(v, out var uri))
+                {
+                    c.ProfilePicture = new global::Microsoft.UI.Xaml.Media.Imaging.BitmapImage(uri);
+                }
+                else if (!ReferenceEquals(c.ReadLocalValue(WinUI.PersonPicture.ProfilePictureProperty), DependencyProperty.UnsetValue))
+                {
+                    // Only clear an existing local value — a fresh control has nothing to reset.
+                    c.ClearValue(WinUI.PersonPicture.ProfilePictureProperty);
+                }
+            });
+
+    internal static bool TryParseProfilePictureUri(string? value, [NotNullWhen(true)] out Uri? uri)
+    {
+        uri = null;
+        return !string.IsNullOrWhiteSpace(value) && Uri.TryCreate(value, UriKind.Absolute, out uri);
+    }
 }
 
 // Spec 058 §15 (P5.16) — Source auto-maps but all 4 events are bespoke typed-arg
@@ -4734,10 +4753,11 @@ public partial record ScrollViewElement(Element Child) : Element
 /// <summary>Border element — a single-child container with brush/corner/thickness chrome.</summary>
 // Spec 058 §15 (P5.18) — Child is the single-content slot ([WrapContent]); CornerRadius and
 // BorderThickness are ergonomic double scalars converted to the WinUI structs ([WrapConvert]);
-// Background/BorderBrush auto-map (Brush is a supported reference). No events. Replaces the
-// hand-coded BorderHandler + the parallel hand-written BorderDescriptor.
+// BorderBrush auto-maps; unset Background restores a concrete modifier or releases local
+// precedence to theme styles. No events. Replaces BorderHandler + BorderDescriptor.
 [global::Microsoft.UI.Reactor.Wrappers.GenerateReactorDescriptor(typeof(WinUI.Border))]
 [global::Microsoft.UI.Reactor.Wrappers.WrapContent("Child")]
+[global::Microsoft.UI.Reactor.Wrappers.WrapManual("Background")]
 [global::Microsoft.UI.Reactor.Wrappers.WrapConvert("CornerRadius")]
 [global::Microsoft.UI.Reactor.Wrappers.WrapConvert("BorderThickness")]
 public partial record BorderElement(Element? Child) : Element
@@ -4747,6 +4767,27 @@ public partial record BorderElement(Element? Child) : Element
     public Brush? BorderBrush { get; init; }
     public double? BorderThickness { get; init; }
     internal Action<WinUI.Border>[] Setters { get; init; } = [];
+
+    private static partial global::Microsoft.UI.Reactor.Core.V1Protocol.Descriptor.ControlDescriptor<BorderElement, WinUI.Border> Customize(
+        global::Microsoft.UI.Reactor.Core.V1Protocol.Descriptor.ControlDescriptor<BorderElement, WinUI.Border> d)
+        => d.OneWay<(Brush? Record, Brush? Modifier)>(
+            // The modifier is part of the value so removing it (or the record) rewrites the
+            // remaining brush here, before native setters run. ApplyModifiers skips unchanged
+            // brushes and leaves the clear of a modifier this entry saw to it.
+            static e => e.Background is null && e.Modifiers?.Background is null
+                ? Optional<(Brush? Record, Brush? Modifier)>.Unset
+                : (e.Background, e.Modifiers?.Background),
+            static (border, brushes) => border.Background = brushes.Record ?? brushes.Modifier,
+            WinUI.Border.BackgroundProperty)
+        // Tell the reconciler the removed modifier was handled here, so ApplyModifiers keeps the
+        // brush this entry restored. A custom handler for BorderElement never marks it.
+        .ImperativeBridged(
+            static (_, _, _) => { },
+            static (ctx, border, oldEl, newEl) =>
+            {
+                if (oldEl.Modifiers?.Background is not null && newEl.Modifiers?.Background is null)
+                    ctx.Reconciler.MarkBackgroundRemovalHandled(border);
+            });
 }
 
 /// <summary>Expander element. <c>IsExpanded</c> defaults to <see cref="Optional{T}.Unset"/> so the control owns its expansion state until explicitly set.</summary>
@@ -5795,7 +5836,9 @@ public partial record FlipViewElement(
 /// content is reconciled live while the dialog is open.
 /// OnClosed reports how the dialog was dismissed — the button the user chose,
 /// or <see cref="ContentDialogResult.None"/> for a declared IsOpen = false. It
-/// does not fire when the dialog is torn down because its owner unmounted.
+/// does not fire when the dialog is torn down because its owner unmounted or
+/// its host/reconciler was disposed. Disposal also cancels deferred opens without
+/// OnOpened. State reset needed during teardown belongs in effect cleanup, not OnClosed.
 /// </summary>
 public record ContentDialogElement(
     string Title,
