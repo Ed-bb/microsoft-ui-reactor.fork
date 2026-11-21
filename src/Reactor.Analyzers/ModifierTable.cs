@@ -272,9 +272,9 @@ internal static class ModifierTable
     // Type groups, named once so the intent is legible at each use site. Each name is its receiver
     // list concatenated, which is deliberate — and it makes set inclusion equivalent to string
     // inclusion. A gate that is a superset of another therefore *necessarily* has a name that
-    // contains the narrower one: ControlBorder is a prefix of ControlBorderGridStack, which is a
-    // prefix of ControlBorderGridStackRelative, which is a prefix of the ...Text form (8 such strict
-    // prefix pairs today), and PanelControlBorder contains ControlBorder without starting with it.
+    // contains the narrower one: ControlBorderGridStack is a prefix of
+    // ControlBorderGridStackRelative, which is a prefix of the ...Text form. The former
+    // ControlBorder group is now a test-only probe for non-prefix substring collisions.
     //
     // So: compare what a gate CONTAINS, not what it is CALLED. Read ModifierInfo.ControlGate /
     // ModifierInfo.PoolResetGate and compare the type sets — that is what every check in
@@ -291,7 +291,6 @@ internal static class ModifierTable
     // and ModifierGateIdentifierTests pins it to this table. Issue #1062.
     private static readonly string[] ControlBorderGridStackRelativeText = { "Control", "Border", "Grid", "StackPanel", "RelativePanel", "TextBlock" };
     private static readonly string[] ControlBorderGridStackRelative = { "Control", "Border", "Grid", "StackPanel", "RelativePanel" };
-    private static readonly string[] ControlBorder = { "Control", "Border" };
     private static readonly string[] PanelControlBorder = { "Panel", "Control", "Border" };
     private static readonly string[] ControlOrTextBlock = { "Control", "TextBlock" };
     private static readonly string[] RichTextBlockOnly = { "RichTextBlockElement" };
@@ -430,20 +429,21 @@ internal static class ModifierTable
             // WinUI declares most of these on Panel subclasses too, and the allow-lists
             // genuinely differ: Panel itself declares only Background; Grid, StackPanel, and
             // RelativePanel each declare their own border-box properties, and TextBlock takes
-            // Padding but not CornerRadius. The three rows without a poolResetGate need none:
-            // CleanElement clears Background for every Panel and both Border* for the whole
-            // Control and Border arms, so once (1) holds there is no gated receiver left for (2)
-            // to exclude — their ControlGate already names exactly the cleared receivers.
+            // Padding but not CornerRadius. Background needs no poolResetGate because
+            // CleanElement clears it for every Panel, including each poolable subtype.
             { "Padding",         new ModifierInfo("Padding",         poolReset: true, controlGate: ControlBorderGridStackRelativeText, poolResetGate: ControlBorderGridStackText) },
             { "CornerRadius",    new ModifierInfo("CornerRadius",    poolReset: true, controlGate: ControlBorderGridStackRelative,     poolResetGate: ControlBorderGridStack) },
-            { "BorderThickness", new ModifierInfo("BorderThickness", poolReset: true, controlGate: ControlBorder) },
-            { "BorderBrush",     new ModifierInfo("BorderBrush",     poolReset: true, controlGate: ControlBorder) },
+            { "BorderThickness", new ModifierInfo("BorderThickness", poolReset: true, controlGate: ControlBorderGridStackRelative, poolResetGate: ControlBorderGridStack) },
+            { "BorderBrush",     new ModifierInfo("BorderBrush",     poolReset: true, controlGate: ControlBorderGridStackRelative, poolResetGate: ControlBorderGridStack) },
             { "Background",      new ModifierInfo("Background",      poolReset: true, controlGate: PanelControlBorder) },
 
             // ── Generic modifier, no runtime gate (REACTOR_MOD_002, Info) ────────────
             // The content-alignment pair IS Control-gated in ApplyModifiers, but WinUI
             // declares those DPs only on Control — if the .Set lambda compiles the receiver
             // already qualifies, so no predicate is needed.
+            // CleanElement clears both since #1013. They deliberately stay MOD_002 per
+            // #1195: clearing on pool return does not lose .Set writes; the next mount
+            // re-applies setters.
             { "HorizontalContentAlignment", new ModifierInfo("HorizontalContentAlignment") },
             { "VerticalContentAlignment",   new ModifierInfo("VerticalContentAlignment") },
 
@@ -612,7 +612,7 @@ internal static class ModifierTable
             // recorded here so the omission is deliberate rather than invisible.
             ["PaddingInlineStart"] = "Reactor-only BiDi logical modifier; folds into the Padding write and inherits its Control/Border/Grid/StackPanel/RelativePanel/TextBlock gate. Not a WinUI property name, so it has no home in Properties (which is keyed on those). REACTOR_MOD_003 coverage needs a modifier-keyed table.",
             ["PaddingInlineEnd"] = "Reactor-only BiDi logical modifier, the mirror of PaddingInlineStart; same guard, same gate, same reasoning.",
-            ["BorderInlineStart"] = "Reactor-only BiDi logical modifier; folds into the BorderThickness write and inherits its Control/Border gate. Not a WinUI property name — same reasoning as PaddingInlineStart. (There is no BorderInlineEnd modifier.)",
+            ["BorderInlineStart"] = "Reactor-only BiDi logical modifier; folds into the BorderThickness write and inherits its Control/Border/Grid/StackPanel/RelativePanel gate. Not a WinUI property name — same reasoning as PaddingInlineStart. (There is no BorderInlineEnd modifier.)",
         };
 
     /// <summary>
@@ -669,16 +669,54 @@ internal static class ModifierTable
 
             ["Resources"] = "Modifier takes an Action<ResourceBuilder>; the property is a ResourceDictionary.",
 
-            // Candidates, deliberately unmapped pending verification of how VisualModifiers
-            // reach the control. Mapping one wrongly ships a code fix that compiles and does
-            // nothing, which is the failure this table exists to prevent — so they stay out
-            // until the application path is confirmed the way ApplyModifiers was.
-            ["Scale"] = "Candidate: routed through VisualModifiers; application path not yet verified against a control-type gate.",
-            ["Rotation"] = "Candidate: routed through VisualModifiers; application path not yet verified.",
-            ["CenterPoint"] = "Candidate: routed through VisualModifiers; application path not yet verified.",
+            // Spec 066 §9.1: a blanket MOD_002 suggestion would rewrite working code on a plain
+            // element into code that takes the visual (spec 066 layer 4 moves these modifiers
+            // onto it), and the analyzer cannot see the later facade writes from event handlers
+            // or ElementRef.Current that would then throw. Keeping them out also means one .Set
+            // write never gets both a REACTOR_ANIM_004 and a REACTOR_MOD_002 diagnostic.
+            ["Scale"] = "Spec 066 layer 4 moves the modifier onto the composition visual, which locks the facades for the control's lifetime; REACTOR_ANIM_004 covers the harmful combination.",
+            ["Rotation"] = "Spec 066 layer 4 moves the modifier onto the composition visual, which locks the facades for the control's lifetime; REACTOR_ANIM_004 covers the harmful combination.",
+            ["CenterPoint"] = "Spec 066 layer 4 moves the modifier onto the composition visual, which locks the facades for the control's lifetime; REACTOR_ANIM_004 covers the harmful combination.",
+
+            // Candidates, deliberately unmapped pending verification of how they reach the
+            // control. Mapping one wrongly ships a code fix that compiles and does nothing,
+            // which is the failure this table exists to prevent.
             ["TabIndex"] = "Candidate: Control-gated in ApplyModifiers, but WinUI also declares TabIndex on UIElement; needs the same gate treatment as Padding before mapping.",
             ["TabNavigation"] = "Candidate: Control-only property; not yet verified against ApplyModifiers.",
             ["XYFocusKeyboardNavigation"] = "Candidate: UIElement property; not yet verified against ApplyModifiers.",
+        };
+
+    /// <summary>
+    /// Fluent modifiers that take the element's composition visual
+    /// (<c>ElementCompositionPreview.GetElementVisual</c>), keyed by method name, with where
+    /// the reconciler takes it. <c>REACTOR_ANIM_004</c> fires when a <c>.Set</c> on the same
+    /// chain writes a facade transform that WinUI rejects once the visual is taken.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Spec 066 §9.1. The set grows with that spec's rollout, one row per modifier that
+    /// starts taking the visual: layer 2 adds the four <c>.XxxTransition()</c>, layer 4
+    /// <c>.Scale</c>, <c>.Rotation</c>, <c>.Translation</c> and <c>.CenterPoint</c>, and layer 5
+    /// <c>.TransformOrigin</c>. Add a row in the same change that makes the modifier take the
+    /// visual, never earlier: before that the facade write still works, so the warning would be
+    /// a false positive.
+    /// </para>
+    /// <para>
+    /// The analyzer confirms each match through the semantic model (a Reactor extension method),
+    /// so a user method of the same name does not trigger it. <c>ModifierTableIntegrityTests</c>
+    /// checks every row names a real <c>ElementExtensions</c> modifier.
+    /// </para>
+    /// </remarks>
+    public static readonly IReadOnlyDictionary<string, string> VisualOwningModifiers =
+        new Dictionary<string, string>(System.StringComparer.Ordinal)
+        {
+            ["Animate"] = "Reconciler.ApplyPropertyAnimation takes the visual to install its implicit animations.",
+            ["InteractionStates"] = "Reconciler.TransitionToState takes the visual on the first state change to animate it.",
+            ["Transition"] = "Reconciler.ApplyEnterTransition/ApplyExitTransition take the visual to animate enter and exit.",
+            ["Keyframes"] = "Reconciler.ApplyKeyframeAnimations takes the visual to start the keyframe animation.",
+            ["LayoutAnimation"] = "Reconciler.ApplyLayoutAnimation takes the visual to install its Offset/Size implicit animations.",
+            ["SpringLayoutAnimation"] = "Sets the same LayoutAnimation config as .LayoutAnimation, so Reconciler.ApplyLayoutAnimation takes the visual.",
+            ["ScrollLinked"] = "Reconciler.ApplyScrollAnimation takes the visual through AnimationHelper.GetElementVisual to bind its expressions.",
         };
 
     // ── Attached properties ──────────────────────────────────────────────────

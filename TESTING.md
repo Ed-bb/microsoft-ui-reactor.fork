@@ -37,6 +37,8 @@ dotnet test tests/Reactor.Tests -p:Platform=x64 && dotnet test tests/Reactor.Sel
 
 `Reactor.SelfTests` and `Reactor.AppTests` declare a `ProjectReference` to `Reactor.AppTests.Host` with `ReferenceOutputAssembly="false"`, so `dotnet test` rebuilds the Host first. No stale binaries. `Reactor.PackagedTests` does the same for `Reactor.PackagedTests.Host`.
 
+For `Reactor.DocPipeline.Tests`, see [Running the doc pipeline tests](docs/contributing/doc-pipeline.md#running-the-doc-pipeline-tests).
+
 ## Flag translation
 
 The suites moved to Microsoft.Testing.Platform when xunit.v3 v4 removed VSTest
@@ -230,10 +232,30 @@ Some tests here parse repo *sources* with Roslyn rather than exercising Reactor 
 | Test | Fails when |
 |---|---|
 | `GallerySnippetAgreementTests` | A `SampleCard` snippet uses a lowerCamelCase name that does not exist in the live code beside it — the snippet renamed, or the card did and the snippet did not. Direction is snippet → live only: a snippet may omit, it may not invent. |
-| `GallerySampleLintTests` | An ItemsView view builder returns something other than an item-container root; a shape paints with `.Background(...)` instead of `Fill`/`Stroke`; or an `ms-appx` asset is missing or not copied to the output. |
+| `GallerySampleLintTests` | An ItemsView view builder returns something other than an item-container root; a shape paints with `.Background(...)` instead of `Fill`/`Stroke`; or an `ms-appx` asset is missing or not copied to the output. Also checks [PUA glyph fonts](#pua-glyph-fonts-in-gallery-samples) in live gallery code and displayed snippets. |
 | `SearchIndexGeneratorTests` | `samples/ReactorGallery/reactor-search-index.json` is stale. Regenerate with `dotnet run --project tools/Reactor.SearchIndex`. |
+| `SearchIndexCoverageTests` | A routed Gallery card is missing or out of order in the index, or a [manifest entry](tests/Reactor.Tests/Tooling/SearchIndexCoverageTests.cs) no longer names a source card. This check still catches omissions after index regeneration. |
 
 A snippet-agreement failure names the page, line, card title and identifier, and says which of the two sides to move. There is no allowlist: fix the snippet or fix the card.
+
+#### PUA glyph fonts in gallery samples
+
+`PuaStringContent_HasFontFamily` checks string content in `TextBlock`, named
+text styles such as `Body` and `Caption`, and button factories such as
+`Button`, `ToggleButton`, and `HyperlinkButton`. It checks live `ControlPages`
+code and compile-time `SampleCard` snippets for `.FontFamily(...)` on the
+element's own fluent chain. See the [Gallery authoring notes](samples/ReactorGallery/README.md#editing-sample-snippets).
+
+Roslyn resolves compile-time constants in the page's context and skips
+unreachable content in constant conditionals and simple switches. The lint
+checks source, so runtime-generated snippets, runtime font values, and font
+changes through record assignments are outside its scope.
+
+After building the unit-test project, run the PUA checks with:
+
+```powershell
+dotnet test tests/Reactor.Tests --no-build -p:Platform=x64 --filter-class '*GallerySampleLintTests' --filter-method '*Pua*'
+```
 
 ---
 
@@ -323,25 +345,26 @@ locating and running the Host so every mode agrees on where the binary lives; it
 configuration and TFM stamped into the test assembly by `Reactor.SelfTests.csproj`, so
 `dotnet test -c Release` finds the Release Host rather than a stale Debug one.
 
-### Fixture registration is two-place — and what that does to name searches
+### Fixture registration and TAP names
 
-Selftest: add the fixture to `AllFixtures` **and** to the `Create()` switch in
-`tests/Reactor.AppTests.Host/SelfTest/SelfTestFixtureRegistry.cs`; miss the second and
-`--list-fixtures` reports a name the run cannot produce. E2E: add it to `AllFixtures` **and**
-to the `Build` switch in `tests/Reactor.AppTests.Host/FixtureRegistry.cs` — `--list-fixtures`
-is selftest-only, so nothing warns you about the E2E half.
+Register each fixture with one name and factory in the ordered `Registrations` table. SelfTest
+uses `tests/Reactor.AppTests.Host/SelfTest/SelfTestFixtureRegistry.cs`. E2E uses
+`tests/Reactor.AppTests.Host/FixtureRegistry.cs`. Keep the relative order of existing entries
+because it determines SelfTest execution order and shard assignment, and E2E navigation order.
 
-That split also makes searching for a TAP name unsafe unless you search the whole tree. TAP
-carries two kinds of name and they live in different files: *fixture* names (registry only, and
-the class they map to is often spelled differently — `CenterOnCurrent_UsesCursorMonitor` →
-`CenterOnCurrentUsesCursorMonitor`) and *check* names (string literals in `H.Check(...)` inside
-`Fixtures/`). Neither location is a superset:
+`--list-fixtures` lists only SelfTest fixtures for the current host tier.
+`FixtureRegistryConsistencyTests` in `Reactor.Tests` checks both tables for duplicate fixture names, and that an entry carries `SelfTestTier.Packaged` exactly when its name has the `Packaged_` prefix.
+
+Search the whole host tree for names from TAP output. *Fixture* names are registered in the table,
+and the class they map to is often spelled differently (`CenterOnCurrent_UsesCursorMonitor`
+maps to `CenterOnCurrentUsesCursorMonitor`). *Check* names come from `H.Check(...)` in the
+fixture implementations.
 
 | probe | blind spot |
 |---|---|
 | grep `SelfTest/Fixtures/` only | fixture names whose class name differs |
 | grep `SelfTestFixtureRegistry.cs` only | check-only names — e.g. `WindowLevel_RuntimeFlip_Topmost`, `TabViewFill_Mounted`, `ExitTr_Removed` are all registry=0 |
-| **grep `tests/Reactor.AppTests.Host/` whole** | **literal names: none — use this** |
+| **grep `tests/Reactor.AppTests.Host/` whole** | A substring search can match a longer fixture name. Search for the full quoted fixture name. |
 
 One blind spot survives even the whole-tree grep: check names built by interpolation —
 `H.Check($"A11y_Role_{role}_Mounted", …)` — match no literal anywhere, so grepping the TAP name
@@ -412,7 +435,7 @@ to silence a flake, fix the flake instead — a skip makes the flake invisible r
 A skip is a per-run observation; tier applicability is a fixed property of the fixture, so a skip
 would restate the same permanent fact on every run and accumulate in the amber inventory — which is
 what [#1154](https://github.com/microsoft/microsoft-ui-reactor/issues/1154) was. Declare the tier in
-`SelfTestFixtureRegistry.TierRequirements` instead and the fixture is simply not selected; see §3.
+its `SelfTestFixtureRegistry.Registrations` entry instead and the fixture is simply not selected; see §3.
 
 For raw-TAP consumers (the AOT job pipes `--self-test` straight to a `.tap` artifact and greps
 `^not ok `), the Host emits a `# Total skipped fixtures: N` trailer — placed *after*
@@ -431,12 +454,14 @@ reference. Its amber is the healthy result — don't "fix" it, and don't copy it
 
 ### Selftest waiting patterns — `Render` vs `WaitFor` vs `WaitForIdleAsync`
 
-Selftests run against a real WinUI dispatcher: most user-visible work (template realization, layout, content-presenter materialization, control intrinsic `Loaded` handlers) lands on *later* dispatcher waves, not synchronously with the mount call. Always wait on a concrete idle signal — never `Task.Delay(<n>)` — and pick the right primitive for the host you're driving:
+Selftests run against a real WinUI dispatcher: most user-visible work (template realization, layout, content-presenter materialization, control intrinsic `Loaded` handlers) lands on *later* dispatcher waves, not synchronously with the mount call. Wait for a concrete state or completion signal instead of guessing with `Task.Delay(<n>)`, and pick the right primitive for the host you're driving:
 
 | You want to… | Use | Why |
 |---|---|---|
 | Pump the dispatcher once because you only need an event queue drain (no realization, no layout) | `await Harness.Render()` | Drains the **shared harness host** (`ReactorApp.PrimaryWindow?.Host`) to idle, runs `UpdateLayout`, yields Low, re-layouts. Cheap when nothing is dirty, but only knows about the harness window. |
 | Wait until a probe predicate against the live visual tree holds | `await Harness.WaitFor(() => H.FindText("Foo") is not null)` | Re-queries the predicate each pass against the current tree. The contention-proof alternative to a one-shot snapshot. Pass `maxPasses`/`perPassMs` to tune. **The predicate must re-query** — capturing a value from before the loop defeats it. |
+| Wait for a timer's cleanup to finish | A completion callback awaited with `Task.WaitAsync(timeout)` | Register before triggering the operation, signal after cleanup, and assert the actual state afterward. Report a timeout through `H.Check` rather than letting it escape. |
+| Check survival through a hold period or a refreshed deadline | An injected scheduler with captured callbacks; see [timer lifetime tests](#timer-lifetime-tests) | Elapsed time is the stimulus. Advance controlled schedules instead of waiting on a predicate that is already true. |
 | Drain an **isolated** `ReactorHost` (one you constructed with `new ReactorHost(myWindow)`, not `H.CreateHost()`) | `await host.WaitForIdleAsync(); ((UIElement)window.Content).UpdateLayout();` | `Harness.Render()` only drives `ReactorApp.PrimaryWindow`'s host, **not** your isolated one. Drive the isolated host directly. Add a `Low`-priority `TryEnqueue` yield after `UpdateLayout` if you need to drain WinUI's deferred realization messages (TabView content-presenters, TitleBar template parts, etc.). |
 
 **Anti-pattern — blind delays:**
@@ -473,14 +498,73 @@ Rules of thumb:
 - **`Render` only when you literally need an event-queue pump.** Anything that may be delayed (layout, control realization, template part materialization, `Loaded` cascades, lazy content presenters) needs `WaitFor` (predicate-based) or a bounded `WaitForIdleAsync` loop — not `Render` alone.
 - **`WaitFor` over a single `Render` + snapshot probe.** A one-shot probe right after `Render()` is the classic flake source on contended/AOT runners. `WaitFor` re-queries; `Render` is a single wave.
 - **But NOT for negative or exact-count assertions — `WaitFor` short-circuits.** `WaitFor` evaluates the predicate *before* its first `Render`, so it returns immediately when the predicate is already true. That makes it the wrong primitive whenever the delay is itself the observation window:
-  - *"X did not happen"* / *"fired exactly once"* / *"state is unchanged"* — e.g. `count == 0`, `CycleCountForTests == 1`, `IsExpanded` still true. Converting these to `WaitFor` makes them **vacuous**: they pass at t=0 without ever giving a violation time to appear. Keep an explicit `Render(N)` window and assert after it.
+  - *"X did not happen"* / *"fired exactly once"* / *"state is unchanged"* — e.g. `count == 0`, `CycleCountForTests == 1`, `IsExpanded` still true. Converting these to `WaitFor` makes them **vacuous**: they pass at t=0 without ever giving a violation time to appear. Keep an explicit `Render(N)` window for dispatcher observations; use [controlled scheduling](#timer-lifetime-tests) when elapsed time itself is under test.
   - Conversely, `WaitFor` is correct for *positive eventual* conditions — a control appears, a bit flips, a callback lands — because the predicate is false until the transition completes.
-  - The test: **can the predicate be true before the action you are testing?** If yes, either keep the fixed window or strengthen the predicate so it cannot (e.g. gate on `sv.VerticalOffset < 1` as well as the row text, so a still-realized row can't satisfy it while scrolled away).
+  - The test: **can the predicate be true before the action you are testing?** If yes, preserve the appropriate observation window, use controlled scheduling, or strengthen the predicate so it cannot (e.g. gate on `sv.VerticalOffset < 1` as well as the row text, so a still-realized row can't satisfy it while scrolled away).
 - **Converting a fixed delay to `WaitFor` is not a safe default — the remediation can itself be the vacuous one.** Because `WaitFor` establishes its predicate *at the moment it returns* and nothing more, the conversion is correct for an *eventual* assertion (false at t=0, converges) and silently vacuous for a *survival* assertion — "still visible", "still expanded" — which is true at t=0 and short-circuits at zero elapsed time. Before converting, ask: **if the predicate is true the instant `WaitFor` is called, does the next assertion still mean what I think it means?**
 - **Ask the same of a precondition `throw`.** Report-and-return when the fixture's other checks remain meaningful; throw loudly when the fixture is structurally invalid (a renamed reflection target) and they do not.
 - **Converting a gate can strip a settle a *later* assertion relied on.** If a following `H.Check` depended on the removed `Render(N)` rather than on its own wait, it will start failing. Give each check its own `WaitFor` instead of letting it inherit someone else's delay.
 - **`host.WaitForIdleAsync()` for isolated hosts.** If you constructed your own `ReactorHost`, neither `Harness.Render` nor `Harness.WaitFor` knows about it.
 - **Save and restore `ReactorApp.ActiveHostInternal`** when using an isolated host so subsequent fixtures see the shared host they expect (`var prev = ReactorApp.ActiveHostInternal; try { … } finally { if (prev is not null) ReactorApp.ActiveHostInternal = prev; }`).
+
+### Timer lifetime tests
+
+[ReconcileHighlightOverlayLifecycleTests](tests/Reactor.AppTests.Host/SelfTest/Fixtures/ReconcileHighlightOverlayLifecycleTests.cs)
+is the worked example for [issue #995](https://github.com/microsoft/microsoft-ui-reactor/issues/995).
+It combines a real-timer completion check with controlled scheduling for lifetime assertions.
+
+For **eventual expiry**, register the completion callback before `Show`, then await it with a
+bounded timeout. Keep the initial creation check and inspect the real sprite and tracking counts
+afterward: a notification alone does not prove that cleanup succeeded. The fixture uses this pattern:
+
+```csharp
+var expired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+overlay.TestExpiryCompleted = () => expired.TrySetResult();
+overlay.Show(canvas, targets, Array.Empty<UIElement>());
+H.Check("Expiry_Created", overlay.LiveSpriteCount == 1);
+
+bool completed;
+try
+{
+    await expired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    completed = true;
+}
+catch (TimeoutException) { completed = false; }
+H.Check("Expiry_Completed", completed);
+H.Check("Expiry_Cleared", overlay.LiveSpriteCount == 0 && overlay.ActiveTargetCount == 0);
+```
+
+For **survival and refresh**, the overlay accepts an instance-level
+`scheduleExpiry(delay, onExpire)` callback that returns a cancellation callback. Production uses
+a one-shot UI dispatcher timer; the fixture captures schedules and advances their due callbacks
+on the UI thread. Both execute the same expiry handler in
+[ReconcileHighlightOverlay](src/Reactor/Hosting/ReconcileHighlightOverlay.cs), rather than calling
+`TestForceExpire()`, which performs cleanup directly.
+
+With an 800ms hold, the refresh fixture checks this timeline without wall-clock delays:
+
+| Controlled time | Action / expected state |
+|---|---|
+| 0ms | Show; original deadline is 800ms. |
+| 500ms | Still alive; refresh cancels the old schedule and sets a new deadline at 1300ms. |
+| 900ms | Still alive beyond the original deadline. |
+| 1299ms | Still alive immediately before the refreshed deadline. |
+| 1300ms | Current callback removes both the sprite and tracking entry. |
+
+Cancellation must not make the test scheduler incapable of delivering an already queued callback.
+The queued-expiry fixture makes the original callback due without dispatching it, refreshes, then
+delivers that old callback after cancellation and checks that the refreshed sprite survives.
+The disposal fixture also delivers captured callbacks after cleanup to verify they are harmless.
+
+Verify these oracles by disabling cleanup, sprite creation, refresh re-arming, and the stale-schedule
+identity guard individually. The corresponding checks must fail while their positive controls and
+the TAP trailer remain present. Restore and rebuild the product assembly between mutations and
+the final passing run; see [mutation checks](#mutation-checks-must-prove-the-mutation-ran).
+
+```powershell
+dotnet build tests/Reactor.AppTests.Host -c Debug -p:Platform=x64 -p:SkipSignaturesGen=true -m:1 -nodereuse:false
+dotnet run --project tests/Reactor.AppTests.Host --no-build -c Debug -p:Platform=x64 -- --self-test --filter OverlayLifecycle
+```
 
 ### Suite duration budget — and why a single arbitrary fixture failure may not be about that fixture
 
@@ -494,7 +578,7 @@ This shape cost six separate investigations before it was diagnosed (issue #988)
 | `Run aborted by dispatcher-starvation hang on fixture 'X' (FailFast did not land; the wrapper's budget killed the process)` | Same signal, but the process would not die even under `FailFast`. **Still causal**, and the extra clause is the diagnosis: it points below the CLR — a native lock or a wedged UI thread. | Debug `X` as above, but expect a native cause. A dump is worth more than a managed stack here. |
 | `Run aborted: suite exceeded its <N>s budget with fixture 'X' in flight (POSITIONAL attribution…)` | The suite ran out of its shared budget with no hang signal. `X` was merely in flight. | Look at the reported elapsed-vs-budget, **not** at `X`. `--filter X` removes the other ~1400 fixtures that shared the budget — it removes the cause, so it passes whether or not `X` is healthy, in *either* direction. |
 | `Run aborted after fixture 'X'` / `Run aborted before fixture 'X'` — with ` (Host died mid-run with no '# Total failures:' trailer — NOT a budget kill; issue #978)` | The Host process stopped mid-fixture on its own (usually a native crash). **This is not #988**, and raising the budget does nothing for it. | Read the exit-code classification in the message first. Check the tail output and stderr for the native fault. |
-| Same prefixes, with ` (Host finished its run, then exited abnormally)` | The Host reached the end of its run — the trailer is present — and then failed to exit cleanly, **or** it ran to completion without ever naming the missing fixtures. | Look at teardown, not at `X`. Issue #680 (0xC0000005 at final process exit) is one known cause; the other is two-place fixture registration — a name `--list-fixtures` reports that the run's `Create()` switch does not produce. |
+| Same prefixes, with ` (Host finished its run, then exited abnormally)` | The Host reached the end of its run — the trailer is present — and then failed to exit cleanly, **or** it ran to completion without ever naming the missing fixtures. | Start with teardown and the TAP output. Issue #680 (0xC0000005 at final process exit) is a known teardown cause. Compare missing fixture names with `--list-fixtures` for the same Host binary, tier, and shard. |
 
 > **Do not let the two "arbitrary victim" failures collapse into one.** A budget kill (#988) and a silent mid-run death (#978) look nearly identical from outside: one fixture blamed, everything after it missing, and the victim moving between runs. The discriminator is the **`# Total failures:` trailer** — a budget kill interrupts a Host that *would* have printed it, whereas a Host that dies mid-fixture never reaches it. Prefer the trailer over elapsed time: timing corroborates but cannot decide, because a slow machine and a fast crash produce overlapping durations. The abort reasons above state which one fired, so this is readable off any skipped fixture without a re-run.
 
@@ -581,6 +665,53 @@ before theorising:**
   This is the only one of the two that still produces a red.
 
 Do not assume "quiet machine ⇒ passes": that holds only in the interactive case.
+
+### Generated-wrapper metadata consumer (issue #1565)
+
+`tests\aot_trim_proof\Reactor.WrapperMetadata` is a separate, code-only app:
+no `App.xaml`, no explicit provider construction, and no shared selftest bootstrap
+that could accidentally root metadata. It realizes SettingsCard/SettingsExpander,
+a second Toolkit library, and a provider-free control, then changes six texts and
+requires the native card header's identity to survive. It exits nonzero on failure
+or a 45-second timeout. It opens a window but does not inject foreground input.
+
+```powershell
+dotnet build tests\aot_trim_proof\Reactor.WrapperMetadata -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:SkipSignaturesGen=true -m:1 -nr:false
+& .\tests\aot_trim_proof\Reactor.WrapperMetadata\bin\x64\Debug\net10.0-windows10.0.22621.0\win-x64\Reactor.WrapperMetadata.exe
+
+# In a Visual Studio Developer environment:
+dotnet publish tests\aot_trim_proof\Reactor.WrapperMetadata -c Release -p:Platform=x64 -r win-x64 -p:PublishAotInternal=true --self-contained -p:SkipSignaturesGen=true -m:1 -nr:false -o artifacts\wrapper-metadata-aot
+& .\artifacts\wrapper-metadata-aot\Reactor.WrapperMetadata.exe
+```
+
+The JIT run must log `dynamic-code=True`; the native run must log
+`dynamic-code=False`. Both must print `PASS updated six texts` and exit 0.
+The unused RadialGauge wrapper is a trimming sentinel: native output should contain
+the used `CardElement`/SettingsControls provider symbols but not `UnusedGaugeElement`
+or the RadialGauge metadata-provider namespace.
+
+The in-repo proof uses central package versions and Windows App SDK injection.
+For shipping-package coverage, pack `src\Reactor` at a unique local version and copy
+**only** this proof's `.csproj` and `Program.cs` into a fresh directory outside the
+repository and any inherited `Directory.Build.*` / `Directory.Packages.props`.
+Materialize its package versions in that **external copy**, where CPM is off by
+default and the repository's SDK injection is absent:
+
+```powershell
+# $consumer is the full path to the copied Reactor.WrapperMetadata.csproj.
+# Use the current central values from Directory.Build.props / Directory.Packages.props.
+dotnet add $consumer package Microsoft.WindowsAppSDK --version 2.2.0 --no-restore
+dotnet add $consumer package CommunityToolkit.WinUI.Controls.SettingsControls --version 8.3.260402-preview2 --no-restore
+dotnet add $consumer package CommunityToolkit.WinUI.Controls.HeaderedControls --version 8.3.260402-preview2 --no-restore
+dotnet add $consumer package CommunityToolkit.WinUI.Controls.RadialGauge --version 8.3.260402-preview2 --no-restore
+```
+
+Then run the same build/publish commands against the external project with
+`-p:ReactorPackageVersion=<version>` and
+`-p:RestoreAdditionalProjectSources=<local-package-feed>`. That selects a
+`PackageReference` instead of all three Reactor project references, exercising the
+generator and authoring attributes shipped in the nupkg. Use separate output
+directories; never add explicit provider roots to this automatic-registration proof.
 
 ### Running selftests under NativeAOT
 
@@ -770,18 +901,18 @@ git branch -D coexist-probe
 
 ### Writing a packaged fixture
 
-Fixtures live in the shared corpus (`tests/Reactor.AppTests.Host/SelfTest/Fixtures/`). Two steps,
-and both are load-bearing. **Gate** the fixture body:
+Fixtures live in the shared corpus (`tests/Reactor.AppTests.Host/SelfTest/Fixtures/`). Add the
+fixture's name and factory to `SelfTestFixtureRegistry.Registrations`. Then configure the
+packaged tier in two steps. **Gate** the fixture body.
 
 ```csharp
 if (!PackagedIdentityFixtures.RequirePackagedTier(H, this)) return;
 ```
 
-and **declare** its tier in `SelfTestFixtureRegistry.TierRequirements`, beside its entry in
-`AllFixtures`:
+**Declare** the tier as the third element of the fixture's `Registrations` entry.
 
 ```csharp
-["Packaged_MyNewThing"] = SelfTestTier.Packaged,
+("Packaged_MyNewThing", static harness => new MyNewThingFixture(harness), SelfTestTier.Packaged),
 ```
 
 Register it with the **`Packaged_`** prefix — that is what the shim's
@@ -1001,6 +1132,15 @@ suite rather than merely lose continuity, and the harness synthesizes an id inst
 > `{"error":{"code":"foreground_not_target"}}` when an unrelated app takes the foreground
 > mid-test — a real and reproducible source of local flake that is *not* a product regression.
 > Running the tier on a desktop you are not also using is the only fix for that.
+
+> **Don't foreground the Host with a bare `SetForegroundWindow` from the test process.** winapp's
+> click/drag verbs activate the Host with a real pointer press, but a test that asks for the
+> foreground itself is subject to Windows' foreground lock: once another process's input (such as
+> an earlier winapp click) has activated a different window, the long-lived test process's call is
+> silently refused. Every retry then repeats the same refused call. `MarkdownSelectionInputProofTests.AcquireForeground`
+> first injects a zero mouse input (no movement, no button) so the test process owns the last
+> input, then retries `SetForegroundWindow` each poll. It avoids an `AttachThreadInput` bridge,
+> which can block on a hung foreground thread. On timeout it reports what held the foreground.
 
 > **Our own Host launch is one of those windows.** The guarantee covers the *body* of a run,
 > not its startup. `HostLaunch.LaunchAndBind` starts the Host and brings its window up directly,

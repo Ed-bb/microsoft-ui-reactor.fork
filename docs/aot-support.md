@@ -40,14 +40,26 @@ These subsystems compile cleanly with `IsAotCompatible=true` (the warnings are s
 | **Form validation** | `FormField`'s default editor resolution goes through `TypeRegistry`. Same caveat as PropertyGrid. | Issue #70 |
 | **Component discovery (`ReactorApp.Run<TApp>` reflection paths)** | The instantiation of `TApp` itself is annotated and works. Devtools component enumeration is available only when the app opts into `Reactor.DevtoolsSupport` at build time and launches with `--devtools`; leave the switch off for retail/AOT builds. | Issue #70 |
 | **Devtools `properties` / `setProperty` DP discovery** | The tools locate `DependencyProperty` statics by reflection, and the trimmer keeps no reflection metadata for them unless something roots the members — so under AOT the lookups find nothing. Not specific to WinUI's CsWinRT-projected static properties: a C#-authored DP *field* on a custom control is equally undiscoverable. Works under JIT, which is where the devtools inner loop lives. The tool reports the likely cause rather than an empty result. See [Devtools DependencyProperty discovery](#devtools-dependencyproperty-discovery) for the measured cost of fixing it. Affected fixture: `Devtools_PropertyToolsDpDiscovery`. | Issue #1109 |
-| **Third-party-assembly XAML metadata (Issue #142 fixtures)** | Built-in WinUI controls work under AOT now. What remains is `{TemplateBinding}` against private DPs in a third-party assembly that ships *no* `.xaml` file: the XAML compiler only emits an `IXamlMetadataProvider` for projects that have at least one `.xaml`, and AOT trims any implicit metadata path. Affected fixtures: `Issue142_CustomControlPrivateDp_Renders`, `Issue142_ThirdPartyControlPrivateDp_Renders`. The library-author workaround is to register a hand-written `IXamlMetadataProvider` via `RegisterControlAssembly`. The same trim hits a compiled `.xaml` page inside a `ReactorApp.Run` app with no `App.xaml`: `ReactorApplication` finds the app's generated provider only by reflecting over the entry assembly, nothing roots it, and AOT removes it, so the page fails to parse (`Hosting_HostControlXamlComponentType`). A vanilla WinUI app is unaffected: its `App` *is* the provider. | Issue #142 |
+| **Third-party-assembly XAML metadata (Issue #142 fixtures)** | Built-in WinUI controls work under AOT now. What remains is `{TemplateBinding}` against private DPs in a third-party assembly that ships *no* `.xaml` file: the XAML compiler only emits an `IXamlMetadataProvider` for projects that have at least one `.xaml`, and AOT trims any implicit metadata path. Affected fixtures: `Issue142_CustomControlPrivateDp_Renders`, `Issue142_ThirdPartyControlPrivateDp_Renders`, `ThemeRefStyle_ThirdPartyStyleFallsBack`. The library-author workaround is to register a hand-written `IXamlMetadataProvider` via `RegisterControlAssembly`. The same trim hits a compiled `.xaml` page inside a `ReactorApp.Run` app with no `App.xaml`: `ReactorApplication` finds the app's generated provider only by reflecting over the entry assembly, nothing roots it, and AOT removes it, so the page fails to parse (`Hosting_HostControlXamlComponentType`). A vanilla WinUI app is unaffected: its `App` *is* the provider. | Issue #142 |
 
 ### Code-only apps wrapping toolkit controls
 
 An observable `ItemsHost` list has generated WinRT exposure, but that only covers
-the collection ABI, not the control library's XAML templates. A code-only AOT app
-may need to statically root and register the toolkit's generated metadata provider
-before mounting wrapped controls. For example, with WCT SettingsControls:
+the collection ABI, not the control library's XAML templates.
+Full `[GenerateReactorWrapper]` wrappers now register a **statically constructed**
+metadata provider when the control assembly exposes one concrete, public,
+non-generic `IXamlMetadataProvider` with a public parameterless constructor
+(issue #1565). This works without `App.xaml` or app-side provider roots, including
+WCT SettingsCard and SettingsExpander. Registration remains in the element's static
+constructor, so an unused wrapper does not root its provider or control library.
+
+Code-only controls without a provider still work. Ambiguous or nonconstructible
+providers produce `REACTORGEN016`; the fallback assembly scan remains best-effort
+and does **not** preserve metadata under trimming. Providers generated later in
+the same compilation, or supplied by another assembly, cannot be discovered by this
+mechanism. Descriptor-only/decorator generation is unchanged. For these cases,
+disable automatic registration with `RegisterAssembly = false` where applicable
+and pass the intended provider instance explicitly. For example:
 
 ```csharp
 ReactorApp.RegisterControlAssembly(
@@ -55,9 +67,10 @@ ReactorApp.RegisterControlAssembly(
         CommunityToolkit_WinUI_Controls_SettingsControls_XamlTypeInfo.XamlMetaDataProvider());
 ```
 
-The concrete provider name depends on the library. The SettingsExpander selftest
-uses this registration explicitly; passing it is not proof of automatic metadata
-discovery under trimming.
+The concrete provider name depends on the library. The separate code-only consumer
+in `tests/aot_trim_proof/Reactor.WrapperMetadata` verifies automatic registration
+without this explicit root. Its JIT and NativeAOT runs check realized text updates
+and retained header identity across two Toolkit libraries and a provider-free control.
 
 ## Devtools DependencyProperty discovery
 
